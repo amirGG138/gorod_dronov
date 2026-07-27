@@ -11,8 +11,9 @@ This directory is a loose workspace, not a single repo (`git rev-parse` fails he
   (Moscow, 2026). This has its own git repo
   (`git -C Archipelago2026 ...`), remote `github.com/Bl1tz2200/Archipelago2026`. All commands below
   assume this directory as cwd.
-- **`docs-sverk/`** — a local mirror of the `edu.sverk.tech` documentation (ROS 2/Obric platform,
-  microdrone whoop platform). Reference material only, not code to build/lint/test.
+- **`docs-sverk/`** — was a local mirror of the `edu.sverk.tech` documentation (ROS 2/Obric
+  platform, microdrone whoop platform). Deleted as a byte-for-byte duplicate; use `docs/sverk/`
+  in the parent repository instead. Reference material only, not code to build/lint/test.
 - `reglament-zmeyka (1).md`, `butterfly.png` — competition rules and reference material, read-only.
 
 ## Platform
