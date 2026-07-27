@@ -1,0 +1,17 @@
+# test-3x3 ArUco markers — from expo_map.txt (the real mat).
+# aruco_cell.py format: `id length_m world_x world_y` (4 cols; comments start with #).
+# DICT_4X4, 0.25 m, on the 0.6 m grid (origin -0.6): pass CELL_SIZE=0.6 FIELD_ORIGIN=-0.6.
+# aruco_cell maps id -> cell = round((world - ORIGIN)/CELL):
+#   id4  ( 0.000,  0.000) -> [1,1] (centre, drone start)
+#   id27 ( 0.601,  0.601) -> [2,2]
+#   id15 (-0.601, -0.605) -> [0,0]
+#   id2  (-0.601,  0.601) -> [0,2]
+#   id42 ( 0.601, -0.605) -> [2,0]
+# Only these 5 cells carry a fiducial, so the camera reality-check confirms the
+# drone only over a marker cell; elsewhere position falls back to PX4 EKF.
+# id  length  world_x  world_y
+4     0.25     0.000    0.000
+27    0.25     0.601    0.601
+15    0.25    -0.601   -0.605
+2     0.25    -0.601    0.601
+42    0.25     0.601   -0.605

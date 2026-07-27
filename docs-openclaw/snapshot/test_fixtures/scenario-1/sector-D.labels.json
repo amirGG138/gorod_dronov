@@ -1,0 +1,11 @@
+{
+  "sector": "D",
+  "coverage": 0.94,
+  "obstacles": [
+    { "type": "wall_segment", "xy": [5, 5], "conf": 0.91 },
+    { "type": "wall_segment", "xy": [5, 6], "conf": 0.92 },
+    { "type": "wall_segment", "xy": [5, 7], "conf": 0.90 },
+    { "type": "parked_car",   "xy": [5, 8], "conf": 0.88 },
+    { "type": "wall_segment", "xy": [5, 9], "conf": 0.92 }
+  ]
+}

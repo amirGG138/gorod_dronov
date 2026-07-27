@@ -1,0 +1,94 @@
+# Overlay: fly the 4 drones through the REAL sverk offboard stack via
+# sverk_interfaces (FLIGHT_BACKEND=sverk -> /px4_i/navigate), each drone's
+# bridge in its OWN container (the "4 full ROS2 images" topology).
+#
+# Physics + FMU stay in the sverk_sitl sim container (one gz PARTITION per drone
+# = single-vehicle world = stable EKF, required for the offboard path to arm/hold;
+# a shared world gives "Yaw estimate error" and will not fly). Bring the sim up
+# with sitl_fleet.sh, then these 4 bridge containers attach to it:
+#
+#   # 1) partitioned px4 fleet + one offboard_control per drone (auto_release=false)
+#   docker exec sverk_sitl bash /tmp/sitl_fleet.sh 4
+#   # 2) the 4 bridge containers + rover + agents
+#   docker compose -f docker-compose.yml -f docker-compose.real.yml \
+#       -f docker-compose.sverk.yml up bridge-sverk-1 bridge-sverk-2 \
+#       bridge-sverk-3 bridge-sverk-4 coordinator drone-1 drone-2 drone-3 drone-4 rover viz
+#
+# PREREQUISITE — sverk_sitl must expose a shareable IPC namespace so each bridge
+# container can share its /dev/shm for FastDDS + gz transport. In docker-sitl's
+# docker-compose.yml add to the `sitl` service:   ipc: shareable
+# (then `docker compose up -d sitl`). Without it the bridge containers cannot
+# see the px4_i DDS topics and fall back to erroring on connect.
+#
+# Each bridge container runs one offboard_control (/px4_i) is NOT needed here —
+# sitl_fleet.sh already launched them inside sverk_sitl and they are visible over
+# the shared DDS graph; the bridge only needs sverk_interfaces to call the
+# /px4_i services. If you prefer the offboard node co-located with the bridge,
+# launch it in the container command before real_bridge.py.
+
+x-sverk-bridge: &sverk-bridge
+  image: sverk/ros2:sitl
+  restart: "no"
+  network_mode: "container:sverk_sitl"   # share localhost DDS (uXRCE :8888) + ports
+  ipc: "container:sverk_sitl"             # share /dev/shm for FastDDS + gz transport
+  volumes:
+    - ./bridge:/opt/openclaw/bridge:ro
+    - ./test_fixtures:/opt/openclaw/test_fixtures:ro
+  working_dir: /opt/openclaw/bridge
+  environment: &sverk-bridge-env
+    FLIGHT_BACKEND: sverk
+    SCENARIO: survey-city
+    WORLD: obrik_aruco6x6
+    FIXTURES: /opt/openclaw/test_fixtures
+    TAKEOFF_Z: "1.5"
+    VLM_FIRE: "1"
+    MODEL_VISION: ${MODEL_VISION:-gemma4-vlm}
+    SVERK_API_BASE: ${SVERK_API_BASE:-https://ai.sverk.tech/v1}
+    SVERK_API_KEY: ${SVERK_API_KEY:-}
+    GZ_SIM_RESOURCE_PATH: /home/sverk/PX4-Autopilot/Tools/simulation/gz/models:/home/sverk/PX4-Autopilot/Tools/simulation/gz/worlds
+  command: >
+    bash -lc 'source /opt/ros/humble/setup.bash;
+      source /home/sverk/sverk_ws/install/setup.bash;
+      python3 real_bridge.py'
+
+services:
+  bridge-sverk-1:
+    <<: *sverk-bridge
+    container_name: bridge-sverk-1
+    environment:
+      <<: *sverk-bridge-env
+      AGENT_ID: drone-1
+      INSTANCE: "0"
+      PORT: "9001"
+      OFFBOARD_NS: /px4_0
+      GZ_PARTITION: d0
+  bridge-sverk-2:
+    <<: *sverk-bridge
+    container_name: bridge-sverk-2
+    environment:
+      <<: *sverk-bridge-env
+      AGENT_ID: drone-2
+      INSTANCE: "1"
+      PORT: "9002"
+      OFFBOARD_NS: /px4_1
+      GZ_PARTITION: d1
+  bridge-sverk-3:
+    <<: *sverk-bridge
+    container_name: bridge-sverk-3
+    environment:
+      <<: *sverk-bridge-env
+      AGENT_ID: drone-3
+      INSTANCE: "2"
+      PORT: "9003"
+      OFFBOARD_NS: /px4_2
+      GZ_PARTITION: d2
+  bridge-sverk-4:
+    <<: *sverk-bridge
+    container_name: bridge-sverk-4
+    environment:
+      <<: *sverk-bridge-env
+      AGENT_ID: drone-4
+      INSTANCE: "3"
+      PORT: "9004"
+      OFFBOARD_NS: /px4_3
+      GZ_PARTITION: d3

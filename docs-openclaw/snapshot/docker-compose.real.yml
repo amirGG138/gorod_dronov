@@ -1,0 +1,84 @@
+# Overlay: drive the 4 REAL PX4 SITL drones (in the sverk_sitl container) instead
+# of the mock bridges. sverk_sitl is joined to openclaw-stack_mesh with alias
+# `fleet`; the real bridges (scripts/real_bridges.sh) serve fleet:9001..9004.
+#
+#   scripts/real_survey.sh           # brings up everything + runs the survey
+#   # or manually:
+#   docker exec sverk_sitl bash /tmp/real_bridges.sh 4
+#   docker compose -f docker-compose.yml -f docker-compose.real.yml up \
+#       coordinator drone-1 drone-2 drone-3 drone-4 rover viz
+#
+# Drones fly the real stack; the rover stays on its mock bridge (cell-by-cell A*)
+# for now. Blackboard remains the source of truth (fallback intact — remove this
+# overlay and the mock bridges drive everything again).
+services:
+  # Agents join `edge` too so a real MODEL_PROVIDER (sverk gemma4-vlm) can reach
+  # the API — mesh is internal (no outbound). Bridges stay reachable at fleet:900N.
+  coordinator:
+    networks: [mesh, edge]
+    volumes:
+      - blackboard:/blackboard
+      - ./test_fixtures:/app/test_fixtures:ro
+    environment:
+      TASK: survey
+      SCENARIO: survey-city
+      SURVEY_MAPPING: "1"
+      SURVEY_CHAT: "1"
+  drone-1:
+    networks: [mesh, edge]
+    volumes:
+      - blackboard:/blackboard
+      - ./test_fixtures:/app/test_fixtures:ro
+    environment:
+      TASK: survey
+      SCENARIO: survey-city
+      SURVEY_MAPPING: "1"
+      SURVEY_CHAT: "1"
+      BRIDGE_URL: http://fleet:9001
+  drone-2:
+    networks: [mesh, edge]
+    volumes:
+      - blackboard:/blackboard
+      - ./test_fixtures:/app/test_fixtures:ro
+    environment:
+      TASK: survey
+      SCENARIO: survey-city
+      SURVEY_MAPPING: "1"
+      SURVEY_CHAT: "1"
+      BRIDGE_URL: http://fleet:9002
+  drone-3:
+    networks: [mesh, edge]
+    volumes:
+      - blackboard:/blackboard
+      - ./test_fixtures:/app/test_fixtures:ro
+    environment:
+      TASK: survey
+      SCENARIO: survey-city
+      SURVEY_MAPPING: "1"
+      SURVEY_CHAT: "1"
+      BRIDGE_URL: http://fleet:9003
+  drone-4:
+    networks: [mesh, edge]
+    volumes:
+      - blackboard:/blackboard
+      - ./test_fixtures:/app/test_fixtures:ro
+    environment:
+      TASK: survey
+      SCENARIO: survey-city
+      SURVEY_MAPPING: "1"
+      SURVEY_CHAT: "1"
+      BRIDGE_URL: http://fleet:9004
+  rover:
+    networks: [mesh, edge]
+    volumes:
+      - blackboard:/blackboard
+      - ./test_fixtures:/app/test_fixtures:ro
+    environment:
+      TASK: survey
+      SCENARIO: survey-city
+      SURVEY_MAPPING: "1"
+      SURVEY_CHAT: "1"
+      BRIDGE_URL: http://fleet:9005
+
+  viz:
+    networks: [mesh, edge]

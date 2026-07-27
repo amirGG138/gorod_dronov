@@ -1,0 +1,282 @@
+<!doctype html><html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Город дронов — city_missions</title>
+<style>
+  :root{--bg:#0d1117;--panel:#161b22;--border:#30363d;--txt:#c9d1d9;--dim:#8b949e;
+        --acc:#58a6ff;--pass:#3fb950;--cand:#e3b341;--fire:#ff5a36}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.45 system-ui,Segoe UI,Roboto,sans-serif}
+  .top{display:flex;align-items:center;gap:12px;padding:10px 16px;border-bottom:1px solid var(--border);
+       background:var(--panel);flex-wrap:wrap}
+  .title{font-weight:700;font-size:16px}
+  .pill{padding:2px 9px;border-radius:12px;border:1px solid var(--border);font-size:12px;color:var(--dim)}
+  .pill.ok{color:var(--pass);border-color:#1f4429;background:#0f2b16}
+  .pill.pend{color:var(--cand);border-color:#5c4a12;background:#2b2410}
+  .wrap{display:grid;grid-template-columns:minmax(340px,1fr) 380px;gap:14px;padding:14px;align-items:start}
+  @media(max-width:900px){.wrap{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:14px}
+  .card h2{margin:0 0 8px;font-size:13px;color:var(--dim);text-transform:uppercase;letter-spacing:.04em}
+  #field{display:grid;grid-template-columns:repeat(6,1fr);gap:5px;position:relative}
+  .cell{position:relative;aspect-ratio:1;border-radius:7px;border:1px solid var(--border);background:#11161d;
+        display:flex;align-items:center;justify-content:center;font-size:20px;cursor:pointer}
+  .cell:hover{outline:2px solid var(--acc);outline-offset:-2px}
+  .cell .xy{position:absolute;left:4px;top:2px;font-size:9px;color:#48505c}
+  .cell.bld{border-style:dashed;opacity:.85}
+  .cell.flew{outline:2px solid rgba(88,166,255,.3);outline-offset:-2px}
+  .cell.rpath{box-shadow:0 0 0 2px rgba(63,185,80,.28) inset}
+  .dot{position:absolute;width:15px;height:15px;border-radius:50%;border:2px solid #0d1117;
+       right:3px;bottom:3px;font-size:9px;display:flex;align-items:center;justify-content:center;color:#0d1117;font-weight:700}
+  /* глайдер-ровер поверх сетки: плавно ЕДЕТ между клетками */
+  .frover{position:absolute;z-index:5;transform:translate(-50%,-50%);width:20px;height:20px;
+          border-radius:5px;background:#c9d1d9;border:2px solid #0d1117;
+          display:flex;align-items:center;justify-content:center;font-size:11px;
+          transition:left .45s cubic-bezier(.4,0,.2,1),top .45s cubic-bezier(.4,0,.2,1)}
+  .frover.lit{box-shadow:0 0 12px 4px var(--fire);background:#ffd0c0}
+  .row{display:flex;justify-content:space-between;gap:8px;padding:4px 0;border-bottom:1px solid #1c222b}
+  .row:last-child{border-bottom:0}
+  .k{color:var(--dim)} .v{font-weight:600}
+  .bar{height:8px;background:#11161d;border-radius:4px;overflow:hidden;margin-top:3px}
+  .bar > i{display:block;height:100%;background:var(--pass)}
+  #feed{max-height:340px;overflow:auto;font-size:12.5px}
+  .ev{padding:5px 0;border-bottom:1px solid #1c222b;display:flex;gap:8px}
+  .ev .t{color:var(--dim);font-variant-numeric:tabular-nums;min-width:44px}
+  .ev.good .b{color:var(--pass)} .ev.warn .b{color:var(--fire)}
+  .leg{font-size:11px;color:var(--dim);margin-top:8px;line-height:1.7}
+  .btn{padding:3px 10px;border-radius:8px;border:1px solid var(--border);background:#1b222c;
+       color:var(--txt);font:inherit;font-size:12px;cursor:pointer}
+  .btn:hover{border-color:var(--acc)}
+  .btn.on{background:#132a1b;border-color:#1f4429;color:var(--pass)}
+  .tgl{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--dim);cursor:pointer;user-select:none}
+  .pill.paused{color:var(--fire);border-color:#5c2a1f;background:#2b1410}
+  .cell > span,.cell .dot,.cell .rover{z-index:1}
+  .plyr{position:absolute;inset:0;border-radius:6px;background-size:cover;background-position:center;
+        opacity:0;transition:opacity .15s;z-index:0;pointer-events:none}
+  .plyr.on{opacity:1;box-shadow:0 0 0 2px var(--drone,rgba(88,166,255,.7)) inset}
+  .cam{position:absolute;right:2px;top:2px;z-index:2;font-size:11px;line-height:1;padding:1px 2px;border-radius:4px;
+       background:rgba(13,17,23,.78);border:1px solid var(--dcol,#58a6ff)}
+  .cell.nocam::after{content:"";position:absolute;right:4px;top:4px;width:6px;height:6px;border-radius:50%;
+       border:1px solid #48505c;z-index:2}   /* пустой кружок = дрон ещё НЕ снял эту клетку */
+  #chat{max-height:320px;overflow:auto;display:flex;flex-direction:column;gap:6px;font-size:12.5px}
+  .msg{padding:5px 8px;border-radius:8px;background:#0e131a;border-left:3px solid var(--agent,#58a6ff);white-space:pre-wrap;word-break:break-word}
+  .msg .h{font-size:11px;color:var(--dim);margin-bottom:2px}
+  .msg .h b{color:var(--agent,#58a6ff)}
+  .msg .type{font-size:10px;padding:0 5px;border-radius:6px;background:#1c222b;color:var(--dim);margin-left:4px}
+  .msg.think{background:#0b0f15;font-style:italic;color:#aeb7c2}
+</style></head>
+<body>
+<div class="top">
+  <span class="title">🏙️ Город дронов</span>
+  <span class="pill" id="phase">фаза —</span>
+  <span class="pill" id="brain" title="мозг агентов (MODEL_PROVIDER)">🧠 —</span>
+  <span class="pill" id="mfire">🔥 пожар —</span>
+  <span class="pill" id="mdel">📦 доставка —</span>
+  <span class="pill" id="mperson">🧑 человек —</span>
+  <span class="pill" id="mtime">⏱ —</span>
+  <span class="pill paused" id="ppause" style="display:none">⏸ на паузе</span>
+  <span style="flex:1"></span>
+  <button class="btn" id="btnPause">⏸ Пауза</button>
+  <button class="btn" id="btnStep" title="кратко продвинуть и снова встать на паузу">⏭ Шаг</button>
+  <label class="tgl" title="ровный вид сверху (skycam) в каждой клетке; клик по клетке — кадр с камеры дрона">
+    <input type="checkbox" id="tglTiles"> 🗺 фото клеток</label>
+</div>
+<div class="wrap">
+  <div>
+    <div class="card"><h2>Поле 6×6</h2><div id="field"></div>
+      <div class="leg">🔋 зарядка · 💧 башня · 🔥N пожар (уровень) · 📦 старт доставки ·
+        🏁 финиш · 🧑 человек · ⬜ ровер (мигалка = свечение) · ● дрон · рамка = облетели ·
+        зелёная тень = маршрут ровера</div></div>
+    <div class="card"><h2>💬 Переговоры агентов (live)</h2><div id="chat"></div></div>
+    <div class="card"><h2>Журнал доказательств (live)</h2><div id="feed"></div></div>
+  </div>
+  <div>
+    <div class="card"><h2>Миссии</h2>
+      <div class="row"><span class="k">порядок</span><span class="v" id="order">—</span></div>
+      <div class="row"><span class="k">причина</span><span class="v" id="reason" style="font-weight:400;text-align:right"></span></div>
+      <div class="row"><span class="k">🔥 пожар</span><span class="v" id="firelvl">—</span></div>
+      <div class="row"><span class="k">💧 циклы воды</span><span class="v" id="cycles">—</span></div>
+      <div class="row"><span class="k">📦 доставка</span><span class="v" id="deliv">—</span></div>
+    </div>
+    <div class="card"><h2>Ровер</h2>
+      <div class="row"><span class="k">клетка</span><span class="v" id="rcell">—</span></div>
+      <div class="row"><span class="k">мигалка (LED)</span><span class="v" id="led">—</span></div>
+      <div class="row"><span class="k">шаг плана</span><span class="v" id="rstep">—</span></div>
+      <div class="row"><span class="k">💧 вода в баке</span><span class="v" id="water">—</span></div>
+      <div class="row"><span class="k">🔋 энергия</span><span class="v" id="energy">—</span></div>
+      <div class="bar"><i id="energybar" style="width:0"></i></div>
+      <div class="row" style="margin-top:6px"><span class="k">🚁 эскорт ВУП</span><span class="v" id="escort">—</span></div>
+    </div>
+    <div class="card"><h2>Дроны-мониторы</h2><div id="drones">—</div></div>
+  </div>
+</div>
+<div id="cellov" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:50;
+     align-items:center;justify-content:center" onclick="if(event.target===this)this.style.display='none'">
+  <div style="background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:16px;max-width:92vw">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <b id="ovtitle">Клетка</b>
+      <span class="btn" onclick="document.getElementById('cellov').style.display='none'">✕</span>
+    </div>
+    <div style="display:flex;gap:14px;flex-wrap:wrap">
+      <div><div class="k" style="margin-bottom:4px">🗺 сверху (skycam, ровно)</div>
+        <img id="ovtile" style="width:260px;height:260px;object-fit:cover;border-radius:8px;border:1px solid var(--border);background:#11161d"></div>
+      <div id="ovdronewrap"><div class="k" id="ovdronelbl" style="margin-bottom:4px">камера дрона</div>
+        <img id="ovdrone" style="width:260px;height:260px;object-fit:cover;border-radius:8px;border:1px solid var(--border);background:#11161d"></div>
+    </div>
+  </div>
+</div>
+<script src="chat.js"></script>
+<script>
+const COLORS=["#58a6ff","#3fb950","#e3b341","#f778ba","#a371f7"];
+const DIST={yellow:"#6b5e12",red:"#5c1f17",blue:"#173a63",green:"#1a4a2c"};
+let MAP=null,WORLD={},BOTS={},ROVER_LIT=false,START0=Date.now(),maxEnergy=1,cyclesDone=0,cyclesTotal=2;
+let PAUSED=false,TILES_ON=false,TILES_V=0;const PHOTOS={};  // cellkey -> drone id that shot it
+
+function droneColor(a){const m=(a||"").match(/(\d+)/);return COLORS[m?(parseInt(m[1])-1)%5:0];}
+function agentColor(a){if(a==="coordinator")return "#e3b341";if(a==="rover")return "#ff8a5b";
+  if((a||"").startsWith("safety"))return "#a371f7";return droneColor(a);}
+const STREAMS={};   // agent id -> its in-flight streaming thought element
+const chatLine=makeChat("chat",agentColor);
+// aligned top-down skycam tile in every cell (reliable, unlike the drones' flaky
+// per-cell flight); border tinted by the drone that surveyed the cell, if any.
+function applyTile(x,y){
+  const p=$(`p-${x}-${y}`);if(!p)return;
+  if(TILES_ON){
+    p.style.backgroundImage=`url(cell_tile?cx=${x}&cy=${y}&v=${TILES_V})`;
+    const agent=PHOTOS[`${x},${y}`];
+    if(agent)p.style.setProperty("--drone",droneColor(agent));else p.style.removeProperty("--drone");
+    p.classList.add("on");
+  }else p.classList.remove("on");
+}
+function applyAllTiles(){for(let x=0;x<6;x++)for(let y=0;y<6;y++)applyTile(x,y);}
+// 📷 badge on cells the drones actually photographed; empty ○ = not shot yet
+function camBadge(x,y,agent){
+  const c=$(`c-${x}-${y}`);if(!c)return;c.classList.remove("nocam");
+  if(c.querySelector(".cam"))return;
+  const b=document.createElement("span");b.className="cam";b.textContent="📷";
+  b.style.setProperty("--dcol",droneColor(agent));b.title="кадр с "+agent+" — клик по клетке";
+  c.appendChild(b);}
+function applyAllCams(){for(const k in PHOTOS){const a=k.split(",");camBadge(+a[0],+a[1],PHOTOS[k]);}}
+// click a cell -> aligned skycam tile (big) + the drone's OWN frame of that cell
+function openCell(x,y){
+  const agent=PHOTOS[`${x},${y}`];
+  $("ovtitle").textContent=`Клетка [${x},${y}]`;
+  $("ovtile").src=`cell_tile?cx=${x}&cy=${y}&v=${Date.now()}`;
+  const dw=$("ovdronewrap");
+  if(agent){$("ovdrone").src=`drone_photo?agent=${encodeURIComponent(agent)}&cx=${x}&cy=${y}`;
+    $("ovdronelbl").textContent=`📷 камера ${agent} — что видел дрон`;dw.style.display="";}
+  else dw.style.display="none";
+  $("cellov").style.display="flex";
+}
+function postJSON(path,hdr,body){return fetch(path,{method:"POST",
+  headers:Object.assign({"content-type":"application/json"},hdr),body:JSON.stringify(body||{})});}
+function updatePauseUI(){
+  $("ppause").style.display=PAUSED?"":"none";
+  const b=$("btnPause");b.textContent=PAUSED?"▶ Продолжить":"⏸ Пауза";b.classList.toggle("on",PAUSED);}
+
+function buildField(){
+  const g=$("field");g.innerHTML="";
+  const grid=(MAP&&MAP.grid)||[];
+  for(let y=0;y<6;y++)for(let x=0;x<6;x++){
+    const bld=grid[y]&&grid[y][x]===1;
+    g.insertAdjacentHTML("beforeend",`<div class="cell nocam ${bld?'bld':''}" id="c-${x}-${y}"><div class="plyr" id="p-${x}-${y}"></div><span class="xy">${x},${y}</span></div>`);
+  }
+  if(!MAP)return;
+  for(const [n,d] of Object.entries(MAP.districts||{}))
+    (d.cells||[]).forEach(c=>{const el=$(`c-${c[0]}-${c[1]}`);if(el)el.style.background=DIST[n]||"";});
+  const put=(cell,ico)=>{if(!cell)return;const el=$(`c-${cell[0]}-${cell[1]}`);if(el)el.insertAdjacentHTML("beforeend",`<span>${ico}</span>`);};
+  put(MAP.charge_zone,"🔋");put(MAP.water_tower,"💧");
+  const f=MAP.fire;if(f)put(f.cell,`🔥${f.level||''}`);
+  const dv=MAP.delivery||{};put(dv.pickup,"📦");put(dv.dropoff,"🏁");
+  if(MAP.person)put(MAP.person.cell,"🧑");
+  applyAllTiles();applyAllCams();
+}
+function placeRover(cell){if(!cell)return;const el=$(`c-${cell[0]}-${cell[1]}`);if(!el)return;
+  let r=$("frover");
+  if(!r){r=document.createElement("span");r.id="frover";r.className="frover";
+    r.textContent="⬜";$("field").appendChild(r);}
+  r.classList.toggle("lit",ROVER_LIT);
+  r.style.left=(el.offsetLeft+el.offsetWidth/2)+"px";
+  r.style.top=(el.offsetTop+el.offsetHeight/2)+"px";}
+function markPath(cells){cells.forEach(c=>{const el=$(`c-${c[0]}-${c[1]}`);if(el)el.classList.add("rpath");});}
+function markFlew(cells){(cells||[]).forEach(c=>{const el=$(`c-${c[0]}-${c[1]}`);if(el)el.classList.add("flew");});}
+function setBar(v){$("energybar").style.width=Math.min(100,100*v/(maxEnergy||1))+"%";}
+
+function applyWorld(w){
+  WORLD=w||{};
+  $("order").textContent=(w.missions||[]).join(" → ")||"—";
+  if(w.reasons&&w.reasons.constraint)$("reason").textContent=w.reasons.constraint;
+  const f=(w.facts&&w.facts.fire)||(MAP&&MAP.fire);
+  if(f){$("firelvl").textContent=`[${f.cell}] · ур.${f.level||1}`;cyclesTotal=f.level||2;}
+  const dv=(w.facts&&w.facts.delivery)||(MAP&&MAP.delivery);
+  if(dv)$("deliv").textContent=`[${dv.pickup}] → [${dv.dropoff}]`;
+  const res=w.result||{};
+  const set=(el,ok,pend,txt)=>{el.className="pill "+(ok?"ok":(pend?"pend":""));el.textContent=txt;};
+  const ex=w.phase==="EXECUTE";
+  set($("mfire"),res.fire_ok===true,ex,`🔥 пожар ${res.fire_ok?'потушен':(ex?'тушим':'—')}`);
+  set($("mdel"),res.delivery_ok===true,ex,`📦 доставка ${res.delivery_ok?'выполнена':(ex?'едет':'—')}`);
+  const person=(w.facts&&w.facts.person)||(MAP&&MAP.person);
+  set($("mperson"),!!person,false,`🧑 человек ${person?'найден':'—'}`);
+  if(typeof res.final_energy!=="undefined")$("energy").textContent=res.final_energy;
+  const assign=w.assign||{},dl=$("drones");dl.innerHTML="";
+  Object.entries(assign).forEach(([id,z],i)=>dl.insertAdjacentHTML("beforeend",
+    `<div class="row"><span class="k"><b style="color:${COLORS[i%5]}">●</b> ${esc(id)}</span><span class="v" style="font-weight:400">${(z||[]).length} кл.</span></div>`));
+  if(w.rover_plan){markPath(w.rover_plan.filter(a=>a.to).map(a=>a.to));$("rstep").textContent=(w.done?"выполнен":"идёт");}
+}
+
+function onEvent(e){
+  const now=((Date.now()-START0)/1000).toFixed(0);
+  const add=(txt,cls="")=>$("feed").insertAdjacentHTML("afterbegin",`<div class="ev ${cls}"><span class="t">${now}s</span><span class="b">${txt}</span></div>`);
+  if(e.brain)setBrain(e.brain);
+  if(e.kind==="phase")$("phase").textContent="фаза "+e.phase;
+  else if(e.kind==="drone_flew"){markFlew(e.cells);add(`🚁 ${esc(e.from)} облетел ${(e.cells||[]).length} кл.`);}
+  else if(e.kind==="analyze"){
+    // детекция по кадру; "fallback:map" = VLM недоступен, ответ взят из карты — тревога
+    const fb=(e.vlm||"").startsWith("fallback:");
+    add(`🔎 ${esc(e.from)} [${e.cell}]: ${e.cargo?"🔥 найдено":"чисто"}`
+        +(e.confidence!=null?` · ${(+e.confidence).toFixed(2)}`:"")
+        +(fb?` · ⚠ VLM-ЗАГЛУШКА (${esc(e.vlm)})`:""),fb?"warn":(e.cargo?"good":""));}
+  else if(e.kind==="observation"){add(`👁 ${esc(e.from)}: ${esc((e.detections||[]).map(x=>x.type).join(", ")||"пусто")}`);}
+  else if(e.kind==="artifact"&&e.cell){PHOTOS[`${e.cell[0]},${e.cell[1]}`]=e.from;applyTile(e.cell[0],e.cell[1]);camBadge(e.cell[0],e.cell[1],e.from);}
+  else if(e.kind==="pause"){PAUSED=!!e.paused;updatePauseUI();}
+  else if(e.kind==="message"){chatLine(e.from,`<b>${esc(e.from)}</b> → ${esc(e.to)} <span class="type">${esc(e.type)}</span>`,e.body);}
+  else if(handleThought(e,chatLine,STREAMS)){}
+  if(e.kind!=="city_evidence")return;
+  const t=e.type,ev=e.evidence||{};
+  if(t==="CHARGED"){maxEnergy=e.energy||maxEnergy;$("energy").textContent=e.energy;setBar(e.energy);add(`🔋 зарядка ${e.seconds}с → ${e.energy} ед.`);}
+  else if(t==="ACTION_COMPLETED"){
+    ROVER_LIT=!!ev.led;placeRover(ev.cell);
+    $("rcell").textContent="["+(ev.cell||"")+"]";$("led").textContent=ev.led?"🔴 горит":"выкл";
+    if(ev.water_loaded!==undefined)$("water").textContent=`💧×${ev.water_loaded} (набрал у башни)`;
+    else if(ev.water_left!==undefined)$("water").textContent=`💧×${ev.water_left} (потратил на пожар)`;
+    const nm=({["fire-1-water-dwell"]:"💧 вода 1",["fire-2-water-dwell"]:"💧 вода 2",["fire-1-extinguish"]:"🔥 тушение 1",["fire-2-extinguish"]:"🔥 тушение 2",["del-load-dwell"]:"📦 погрузка 5с"})[e.action_id]||e.action_id;
+    add(`✓ ${esc(nm)} @[${ev.cell}] · пауза ${ev.stationary_seconds}с · ${ev.counted?'засчитано':'НЕ засчитано'}`,ev.counted?"good":"warn");
+    if((e.action_id||"").includes("water")){cyclesDone++;$("cycles").textContent=`${cyclesDone}/${cyclesTotal}`;}
+  }
+  else if(t==="FIRE_EXTINGUISHED")add(`🔥→💧 пожар потушен за ${e.cycles} цикла`,"good");
+  else if(t==="PERSON_FOUND")add(`🧑 человек найден @[${e.cell}]`,"good");
+  else if(t==="ESCORT_LAUNCHED"){$("escort").textContent="запущен, сзади ≤2 кл.";add(`🚁 эскорт ВУП запущен`);}
+  else if(t==="DELIVERY_DONE")add(`📦 доставлено @[${e.cell}] (эскорт≤${e.escort_max_lag})`,"good");
+  else if(t==="ENERGY_BLOCK")add(`⚠ энергия=0, движение заблокировано @[${e.cell}]`,"warn");
+  else if(t==="ROVER_DONE"){$("energy").textContent=e.energy;setBar(e.energy);add(`🏁 ровер закончил план, заряд ${e.energy}`,"good");}
+}
+
+function poll(){
+  fetch("state/world").then(r=>r.json()).then(applyWorld).catch(()=>{});
+  fetch("state/phase").then(r=>r.json()).then(p=>{if(p&&p.phase)$("phase").textContent="фаза "+p.phase;}).catch(()=>{});
+}
+$("btnPause").onclick=()=>{PAUSED=!PAUSED;updatePauseUI();
+  postJSON("pause",{"x-pause":"1"},{paused:PAUSED,reason:"operator"}).catch(()=>{PAUSED=!PAUSED;updatePauseUI();});};
+$("btnStep").onclick=()=>{postJSON("step",{"x-pause":"1"},{secs:2}).catch(()=>{});};
+$("tglTiles").onchange=e=>{TILES_ON=e.target.checked;applyAllTiles();};
+$("field").addEventListener("click",e=>{const c=e.target.closest(".cell");if(!c)return;
+  const m=c.id.match(/c-(\d+)-(\d+)/);if(m)openCell(+m[1],+m[2]);});
+setInterval(()=>{if(TILES_ON){TILES_V++;applyAllTiles();}},5000);   // refresh live skycam tiles
+{const q=new URLSearchParams(location.search);                       // deep-link: open with tiles on
+ if(q.get("tiles")==="1"||q.get("photos")==="1"||location.hash==="#tiles"){
+   $("tglTiles").checked=true;TILES_ON=true;applyAllTiles();}}
+fetch("state/pause").then(r=>r.json()).then(p=>{PAUSED=!!(p&&p.paused);updatePauseUI();}).catch(()=>{});
+fetch("scenario.json").then(r=>r.ok?r.json():Promise.reject()).then(m=>{MAP=m;buildField();applyWorld(WORLD);}).catch(()=>buildField());
+const es=new EventSource("events");
+es.onmessage=ev=>{try{onEvent(JSON.parse(ev.data));}catch(e){}};
+poll();setInterval(poll,2500);
+setInterval(()=>{const s=WORLD.result&&WORLD.result.sim_time_s;$("mtime").textContent="⏱ "+(s||((Date.now()-START0)/1000|0))+"с";},1000);
+</script></body></html>

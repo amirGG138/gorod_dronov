@@ -1,0 +1,112 @@
+# ОДИН ДРОН = один унифицированный узел (multi-host deploy).
+#
+# PicoClaw/агент ставится на разные дроны ОДНИМ образом; профиль проекта — это
+# .env, записываемый на все дроны команды (см. .env.drone.example):
+#
+#     HANDLER_ID=team-7          # чей это дрон (несколько команд в одной сети!)
+#     FLEET=city                 # city | painter — чтобы дроны не путали дашборды
+#     HUB_URL=http://10.0.0.2:8080
+#     HUB_TOKEN=<секрет команды>
+#     AGENT_ID=drone-3           # можно опустить: возьмётся из привязки
+#
+# Привязка «этот борт — этого хендлера» живёт в ПОСТОЯННОЙ памяти Raspberry
+# (volume openclaw-binding -> /data/binding.json) и переживает перезагрузку и
+# смену IP. Первичная привязка — LED-регистрация на странице хаба /fleet:
+# оператор «тыкает» дрона, тот мигает лентой выбранным цветом, оператор
+# подтверждает — привязка уезжает на борт COMMAND-сообщением и сохраняется.
+#
+#   город дронов:   FLEET=city   ROLE=scout    (см. .env.drone.example)
+#   художники:      FLEET=painter ROLE=painter TASK=painting
+#
+#   docker compose -p $AGENT_ID -f docker-compose.drone.yml up -d
+#
+# Бридж: по умолчанию dev-мок; на железе BRIDGE_IMAGE=openclaw-bridge-ros2
+# (bridge/ros2/Dockerfile поверх вашего sverk-ros2 образа) + network host,
+# чтобы нода видела PX4 DDS и бортовой ros2_mcp (:9092).
+
+services:
+  agent:
+    image: openclaw-drone
+    build: { context: ., dockerfile: drone/Dockerfile }
+    container_name: ${AGENT_ID:-drone}-agent
+    restart: unless-stopped
+    depends_on: { bridge: { condition: service_healthy } }
+    environment:
+      AGENT_ID: ${AGENT_ID:-}               # пусто -> из сохранённой привязки
+      ROLE: "${ROLE:?set ROLE scout | rover | painter}"
+      TASK: ${TASK:-}                       # blank -> inferred from ROLE
+      HUB_URL: "${HUB_URL:?set HUB_URL e.g. http://orchestrator:8080}"
+      HUB_TOKEN: ${HUB_TOKEN:-}
+      # --- идентификация команды/флота (несколько команд в одной локалке) ---
+      HANDLER_ID: ${HANDLER_ID:-}
+      FLEET: ${FLEET:-}                     # city | painter
+      BIND_FILE: /data/binding.json         # постоянная память привязки
+      BRIDGE_URL: http://bridge:9000
+      BRAIN: ${BRAIN:-wrapper}              # wrapper | picoclaw
+      FIXTURES: /app/test_fixtures
+      SCENARIO: ${SCENARIO:-}               # blank -> entrypoint picks per task
+      SECTORS: A,B,C,D
+      QUADRANTS: Q1,Q2,Q3,Q4
+      ZONES: ${ZONES:-Z1,Z2,Z3,Z4}
+      WAIT_SCALE: ${WAIT_SCALE:-1.0}        # железо: реальные ожидания
+      PAINT_STEP_SEC: ${PAINT_STEP_SEC:-0.12}
+      DRONE_NAME: ${DRONE_NAME:-}           # optional painter persona overrides
+      DRONE_COLOR: ${DRONE_COLOR:-}
+      DRONE_TECHNIQUE: ${DRONE_TECHNIQUE:-}
+      DRONE_SUBJECT: ${DRONE_SUBJECT:-}
+      MODEL_PROVIDER: ${MODEL_PROVIDER:-sverk}
+      MODEL: ${MODEL:-}
+      MODEL_TIMEOUT: ${MODEL_TIMEOUT:-45}
+      MODEL_MAX_TOKENS: ${MODEL_MAX_TOKENS:-200}
+      SVERK_API_KEY: ${SVERK_API_KEY:-}
+      SVERK_API_BASE: ${SVERK_API_BASE:-https://ai.sverk.tech/v1}
+      OLLAMA_BASE: ${OLLAMA_BASE:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    read_only: true
+    tmpfs: [/tmp]
+    volumes:
+      - openclaw-binding:/data              # привязка переживает перезагрузку
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    networks: [robot]
+
+  bridge:
+    # dev: ros2-bridge-mock; железо: openclaw-bridge-ros2 (ваш sverk-ros2 внутри)
+    image: ${BRIDGE_IMAGE:-ros2-bridge-mock}
+    build: { context: ., dockerfile: bridge/Dockerfile }
+    container_name: ${AGENT_ID:-drone}-bridge
+    restart: unless-stopped
+    environment:
+      AGENT_ID: ${AGENT_ID:-drone}
+      BRIDGE_MODE: ${FLEET:-city}           # 2 режима одной ноды: city | painter
+      BLACKBOARD: /blackboard               # local to this robot (artifacts only)
+      FIXTURES: /app/test_fixtures
+      SCENARIO: ${SCENARIO:-scenario-1}
+      PORT: "9000"
+      NAV_STEP_SEC: ${NAV_STEP_SEC:-0.15}
+      PAINT_STEP_SEC: ${PAINT_STEP_SEC:-0.12}
+      # --- поле/полёт для реальной ноды (bridge/ros2/bridge_node.py) ---
+      BRIDGE_FRAME: ${BRIDGE_FRAME:-aruco_map}
+      CELL_SIZE_M: ${CELL_SIZE_M:-0.8}
+      FIELD_ORIGIN_X: ${FIELD_ORIGIN_X:-0.0}
+      FIELD_ORIGIN_Y: ${FIELD_ORIGIN_Y:-0.0}
+      FLIGHT_ALT_M: ${FLIGHT_ALT_M:-1.5}
+      ROS2_MCP_URL: ${ROS2_MCP_URL:-http://localhost:9092}
+    tmpfs: [/blackboard, /tmp]              # ephemeral local artifact store
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys;sys.exit(0 if urllib.request.urlopen('http://localhost:9000/healthz',timeout=2).status==200 else 1)"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+    networks: [robot]
+
+networks:
+  robot:
+    driver: bridge
+
+volumes:
+  openclaw-binding:   # /data — постоянная память привязки дрон↔хендлер

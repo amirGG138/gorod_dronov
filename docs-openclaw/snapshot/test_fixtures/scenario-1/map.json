@@ -1,0 +1,24 @@
+{
+  "name": "scenario-1",
+  "description": "Model street, 10x10 occupancy grid. A wall on column x=5 (y=2..9) blocks the direct A->B diagonal; the only crossing is the gap at y=0..1, so the rover must route around it.",
+  "grid": [
+    [0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,0,0,0,0,0],
+    [0,0,0,0,0,1,0,0,0,0],
+    [0,0,0,0,0,1,0,0,0,0],
+    [0,0,0,0,0,1,0,0,0,0],
+    [0,0,0,0,0,1,0,0,0,0],
+    [0,0,0,0,0,1,0,0,0,0],
+    [0,0,0,0,0,1,0,0,0,0],
+    [0,0,0,0,0,1,0,0,0,0],
+    [0,0,0,0,0,1,0,0,0,0]
+  ],
+  "start": [0, 0],
+  "goal": [9, 9],
+  "sectors": {
+    "A": { "image": "sector-A.png", "bounds": [0, 4, 0, 4], "expected_coverage": 0.95 },
+    "B": { "image": "sector-B.png", "bounds": [5, 9, 0, 4], "expected_coverage": 0.95 },
+    "C": { "image": "sector-C.png", "bounds": [0, 4, 5, 9], "expected_coverage": 0.95 },
+    "D": { "image": "sector-D.png", "bounds": [5, 9, 5, 9], "expected_coverage": 0.95 }
+  }
+}

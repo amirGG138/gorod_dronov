@@ -1,0 +1,85 @@
+# Overlay: run city_missions as a REAL multi-agent scenario. The coordinator plans
+# fire + delivery; the ROVER agent drives the compiled plan on the real gz rover
+# cube (bridge/rover_bridge.py at fleet:9005) — cell-by-cell, LED beacon, 3s/5s
+# dwells, energy. Monitor drones post structured observations; safety-1 (ВУП) does
+# the person search + escort.
+#
+#   scripts/city_real.sh           # brings up the rover bridge + agents + viz
+#
+# The rover bridge runs INSIDE sverk_sitl (shares gz partition d0); sverk_sitl is on
+# openclaw-stack_mesh with alias `fleet`, so the rover agent reaches it at fleet:9005.
+services:
+  coordinator:
+    networks: [mesh, edge]
+    volumes:
+      - blackboard:/blackboard
+      - ./test_fixtures:/app/test_fixtures:ro
+    environment:
+      TASK: city_missions
+      SCENARIO: city-1
+      CITY_REAL_ROVER: "1"
+      SCOUTS: drone-1,drone-2,drone-3,drone-4
+      # эффектный облёт: каждый дрон берёт по N клеток по очереди (scattered) вместо
+      # своего цельного квадранта. WATER_CAPACITY=1 => ровер ездит за водой каждый цикл.
+      SURVEY_ROUNDROBIN: ${SURVEY_ROUNDROBIN:-0}
+      SURVEY_CELLS_PER_TURN: ${SURVEY_CELLS_PER_TURN:-2}
+      WATER_CAPACITY: ${WATER_CAPACITY:-1}
+  drone-1:
+    networks: [mesh, edge]
+    volumes: [blackboard:/blackboard, "./test_fixtures:/app/test_fixtures:ro"]
+    environment: { TASK: city_missions, SCENARIO: city-1, CITY_REAL_ROVER: "1", ROLE: scout }
+  drone-2:
+    networks: [mesh, edge]
+    volumes: [blackboard:/blackboard, "./test_fixtures:/app/test_fixtures:ro"]
+    environment: { TASK: city_missions, SCENARIO: city-1, CITY_REAL_ROVER: "1", ROLE: scout }
+  drone-3:
+    networks: [mesh, edge]
+    volumes: [blackboard:/blackboard, "./test_fixtures:/app/test_fixtures:ro"]
+    environment: { TASK: city_missions, SCENARIO: city-1, CITY_REAL_ROVER: "1", ROLE: scout }
+  drone-4:
+    networks: [mesh, edge]
+    volumes: [blackboard:/blackboard, "./test_fixtures:/app/test_fixtures:ro"]
+    environment: { TASK: city_missions, SCENARIO: city-1, CITY_REAL_ROVER: "1", ROLE: scout }
+  rover:
+    networks: [mesh, edge]
+    volumes: [blackboard:/blackboard, "./test_fixtures:/app/test_fixtures:ro"]
+    environment:
+      TASK: city_missions
+      SCENARIO: city-1
+      CITY_REAL_ROVER: "1"
+      ROLE: rover
+      BRIDGE_URL: http://fleet:9005     # the real gz rover cube
+      BRIDGE_TIMEOUT: "180"
+      WATER_CAPACITY: ${WATER_CAPACITY:-1}
+  safety-1:
+    image: picoclaw-agent
+    build: { context: ., dockerfile: agent/Dockerfile }
+    container_name: safety-1
+    restart: "no"
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    networks: [mesh, edge]
+    volumes: [blackboard:/blackboard, "./test_fixtures:/app/test_fixtures:ro"]
+    environment:
+      BLACKBOARD: /blackboard
+      FIXTURES: /app/test_fixtures
+      TASK: city_missions
+      SCENARIO: city-1
+      CITY_REAL_ROVER: "1"
+      AGENT_ID: safety-1
+      ROLE: safety_drone
+      SCOUTS: drone-1,drone-2,drone-3,drone-4
+      MODEL_PROVIDER: ${MODEL_PROVIDER:-mock}
+      SVERK_API_KEY: ${SVERK_API_KEY:-}
+      SVERK_API_BASE: ${SVERK_API_BASE:-https://ai.sverk.tech/v1}
+  viz:
+    networks: [mesh, edge]
+    # rw board: operator controls (pause/step, set_cell, identify/bind) write
+    # pause.json / events / messages. Atomic writes (bb.py) => safe alongside the
+    # coordinator. Base compose mounts it :ro (pure read-only dashboard).
+    volumes:
+      - blackboard:/blackboard
+    environment:
+      SCENARIO: city-1

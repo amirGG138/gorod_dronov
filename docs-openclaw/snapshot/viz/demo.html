@@ -1,0 +1,660 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Демо-пульт · интерфейсы бриджей</title>
+<style>
+  :root{--bg:#0b0f16;--panel:#121826;--line:#233046;--txt:#e6edf3;--dim:#8b98a9;
+        --acc:#16b8f3;--ok:#2ea043;--err:#f85149;--warn:#d29922}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);
+       font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+  header{display:flex;flex-wrap:wrap;gap:10px;align-items:center;
+         padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+  h1{font-size:15px;margin:0 12px 0 0}
+  .field-cfg{display:flex;gap:6px;align-items:center;color:var(--dim)}
+  input[type=number]{width:64px;background:#0d1420;color:var(--txt);
+       border:1px solid var(--line);border-radius:6px;padding:4px 6px}
+  button{background:#182236;color:var(--txt);border:1px solid var(--line);
+         border-radius:8px;padding:5px 12px;cursor:pointer}
+  button:hover{border-color:var(--acc)}
+  button.acc{background:var(--acc);color:#04131c;border-color:var(--acc);font-weight:600}
+  main{display:grid;grid-template-columns:minmax(320px,1fr) 340px;gap:14px;padding:14px 16px}
+  @media(max-width:900px){main{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px}
+  .card h2{font-size:13px;margin:0 0 8px;color:var(--dim);text-transform:uppercase;letter-spacing:.06em}
+  /* grid */
+  #grid{display:grid;gap:3px;user-select:none}
+  .cell{position:relative;aspect-ratio:1;background:#0d1420;border:1px solid #1b2537;
+        border-radius:6px;cursor:pointer;display:flex;align-items:center;justify-content:center}
+  .cell:hover{border-color:var(--acc)}
+  .cell .cc{position:absolute;left:4px;top:2px;font-size:9px;color:#3d4c63}
+  .bot{position:absolute;font-size:20px;filter:drop-shadow(0 2px 4px #000a);
+       transition:none;pointer-events:none}
+  .bot .tag{position:absolute;left:50%;transform:translateX(-50%);top:-13px;
+       font-size:9px;background:#0009;border-radius:4px;padding:0 4px;white-space:nowrap}
+  /* robots */
+  .robot{display:flex;align-items:center;gap:8px;padding:6px 8px;border:1px solid var(--line);
+         border-radius:8px;margin-bottom:6px;cursor:pointer}
+  .robot.sel{border-color:var(--acc);background:#0e1b2a}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--err);flex:none}
+  .dot.ok{background:var(--ok)}
+  .robot .nm{font-weight:600}
+  .robot .info{margin-left:auto;color:var(--dim);font-size:12px}
+  .badge{font-size:10px;border:1px solid var(--warn);color:var(--warn);
+         border-radius:4px;padding:0 4px}
+  .actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+  select{background:#0d1420;color:var(--txt);border:1px solid var(--line);
+         border-radius:6px;padding:4px 6px}
+  #log{height:230px;overflow-y:auto;font:12px/1.5 ui-monospace,monospace;
+       background:#0a0e15;border-radius:8px;padding:8px;white-space:pre-wrap}
+  #log .t{color:#3d4c63}
+  #log .e{color:var(--err)}
+  #log .o{color:var(--ok)}
+  .hint{color:var(--dim);font-size:12px;margin-top:6px}
+</style>
+</head>
+<body>
+<header>
+  <h1>🕹 Демо-пульт</h1>
+  <div class="field-cfg">
+    поле <input id="nx" type="number" min="1" max="32" value="5">×<input id="ny" type="number" min="1" max="32" value="5">
+    клетка <input id="cs" type="number" min="0.05" max="10" step="0.05" value="0.6"> м
+    <button class="acc" onclick="applyField()">Применить поле</button>
+  </div>
+  <span id="fieldinfo" style="color:var(--dim);margin-left:auto"></span>
+</header>
+<main>
+  <section class="card" id="fieldcard">
+    <h2 style="display:flex;align-items:center;gap:8px">Поле — клик по клетке = команда выбранному роботу
+      <button id="fieldtgl" onclick="toggleField()" style="margin-left:auto;font-size:11px;padding:2px 8px">Свернуть</button>
+    </h2>
+    <div id="grid"></div>
+    <div class="hint">Команды идут через те же HTTP-эндпоинты бриджа, что использует ЛЛМ
+      (<code>/move</code>, <code>/navigate</code>, <code>/pose</code>, <code>/dwell</code>, <code>/led</code>).</div>
+  </section>
+  <section>
+    <div class="card">
+      <h2>Роботы</h2>
+      <div id="robots"></div>
+      <div class="actions">
+        режим клика:
+        <select id="clickmode">
+          <option value="move">move (прямо в клетку)</option>
+          <option value="navigate">navigate (стрим по пути)</option>
+          <option value="initial_pose">initial_pose (локализовать тут)</option>
+        </select>
+      </div>
+      <div class="actions">
+        <button onclick="cmd('dwell',{seconds:3,led:'blink'})">⏱ dwell 3с + мигалка</button>
+        <button onclick="cmd('led',{effect:'fill',r:22,g:184,b:243})">💡 LED</button>
+        <button onclick="cmd('led',{effect:'off'})">LED off</button>
+        <button onclick="cmd('land',{})">⬇ land</button>
+        <button onclick="cmd('takeoff',{})">⬆ takeoff</button>
+        <button onclick="cmdPhoto()">📷 photograph</button>
+        <button onclick="cmd('stop',{})">✋ stop</button>
+      </div>
+    </div>
+    <div class="card" style="margin-top:14px" id="slamcard" hidden>
+      <h2>Ровер · SLAM / локализация</h2>
+      <div id="mapbanner" hidden style="background:#3a2a00;border:1px solid var(--warn);
+           color:var(--warn);border-radius:8px;padding:6px 10px;margin-bottom:6px;font-weight:600">
+        🟠 Режим ДОСТРОЙКИ карты: катай ровера (WASD/телеоп), полотно растёт live.
+        Закончил — «💾 Сохранить карту», потом «Вернуть навигацию».</div>
+      <div id="slamstatus" style="font-size:12px;color:var(--dim);margin-bottom:6px">—</div>
+      <div class="actions" style="align-items:center;margin:0 0 6px">
+        клик по карте =
+        <select id="mapclick">
+          <option value="goto">🎯 поехать в точку (goto)</option>
+          <option value="initial_pose">📍 локализовать тут (initial pose)</option>
+          <option value="anchor">✛ поставить якорь сетки [0,0]</option>
+        </select>
+      </div>
+      <div id="mapwrap" style="position:relative;display:inline-block;max-width:100%;cursor:crosshair">
+        <img id="slammap" src="/demo/rover_map.png" alt="карта SLAM"
+             style="max-width:100%;display:block;border-radius:8px;border:1px solid var(--line);image-rendering:pixelated">
+        <canvas id="slamovl" style="position:absolute;left:0;top:0;pointer-events:none"></canvas>
+      </div>
+      <div class="actions" style="align-items:center">
+        📍 x <input id="ipx" type="number" step="0.05" value="0" style="width:70px">
+        y <input id="ipy" type="number" step="0.05" value="0" style="width:70px">
+        yaw° <input id="ipyaw" type="number" step="1" value="0" style="width:60px">
+        <button onclick="setInitialPose()">Локализовать здесь</button>
+        <button onclick="poseFromRover()">← текущая поза</button>
+        <button onclick="gotoPoint()">🎯 goto (x,y)</button>
+      </div>
+      <div class="actions" style="align-items:center">
+        сетка на карте: x0 <input id="gx0" type="number" step="0.05" value="0" style="width:70px">
+        y0 <input id="gy0" type="number" step="0.05" value="0" style="width:70px">
+        yaw° <input id="gyaw" type="number" step="1" value="0" style="width:60px">
+        <button onclick="pushGridAnchor()">💾 Записать в ровер</button>
+      </div>
+      <div class="actions" style="align-items:center">
+        🕹 телеоп:
+        <button onclick="teleop(0.12,0,0)">▲ вперёд</button>
+        <button onclick="teleop(-0.12,0,0)">▼ назад</button>
+        <button onclick="teleop(0,0.12,0)">⟸ влево</button>
+        <button onclick="teleop(0,-0.12,0)">⟹ вправо</button>
+        <button onclick="teleop(0,0,0.6)">↺</button>
+        <button onclick="teleop(0,0,-0.6)">↻</button>
+        <button id="wasdbtn" onclick="toggleWasd()">⌨ WASD+QE</button>
+        <label style="color:var(--dim);font-size:12px">
+          <input type="checkbox" id="livemap" checked> live-карта</label>
+      </div>
+      <div class="actions" style="align-items:center">
+        скорость <input id="tspeed" type="number" min="0.03" max="0.5" step="0.01" value="0.12" style="width:64px"> м/с ·
+        поворот <input id="tturn" type="number" min="0.1" max="2" step="0.1" value="0.6" style="width:60px"> рад/с
+      </div>
+      <div class="actions" style="align-items:center">
+        🗺 SLAM: <span id="mapmode" style="color:var(--dim)">—</span>
+        <button onclick="mappingCmd('update', true)">Достроить карту</button>
+        <button onclick="mappingCmd('start', true)">Новая карта</button>
+        <input id="mapname" placeholder="имя карты" style="width:110px;background:#0d1420;color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:4px 6px">
+        <button onclick="mappingSave()">💾 Сохранить карту</button>
+        <button onclick="mappingCmd('stop', true)">Вернуть навигацию</button>
+        <button onclick="mappingCmd('recover')" title="дожать lifecycle-активацию Nav2 (bt_navigator/planner виснут в inactive на нагруженном Pi)">⚡ Оживить Nav2</button>
+      </div>
+      <div class="hint">В режиме навигации карта СТАТИЧНА — лидар видит препятствия
+        (Nav2 их объезжает), но в карту они не пишутся. Чтобы вписать коробку:
+        «<b>Достроить карту</b>» (SLAM продолжит текущую карту от текущей позы; нужна
+        локализация) или «Новая карта» (с нуля). Борт перезапустится в профиль mapping
+        (~40с, Nav2/goto гаснут) — катай ровера телеоп-кнопками вокруг объекта,
+        жми «💾 Сохранить» — картинка тут обновится (это и есть live-прогресс).
+        Потом «Вернуть навигацию» и локализуй ровера (📍).
+        Сетка: клетка [0,0] = точка (x0,y0) на карте, оси повёрнуты на yaw — рамка
+        показывает, как наше поле ложится на SLAM-карту.</div>
+    </div>
+    <div class="card" style="margin-top:14px">
+      <h2>Журнал команд</h2>
+      <div id="log"></div>
+    </div>
+  </section>
+</main>
+<script>
+let FIELD = {grid_size:[5,5], cell_size:0.6};
+let ROBOTS = {};
+let SEL = null;
+
+const $ = id => document.getElementById(id);
+function log(msg, cls) {
+  const d = $('log');
+  const t = new Date().toTimeString().slice(0,8);
+  d.innerHTML += `<span class="t">${t}</span> <span class="${cls||''}">${msg}</span>\n`;
+  d.scrollTop = d.scrollHeight;
+}
+
+// сворачивание поля: SLAM-карте нужно место (состояние переживает reload)
+function toggleField(force) {
+  const off = force !== undefined ? force : $('grid').style.display !== 'none';
+  $('grid').style.display = off ? 'none' : '';
+  $('fieldtgl').textContent = off ? 'Развернуть' : 'Свернуть';
+  document.querySelector('main').style.gridTemplateColumns = off ? '260px 1fr' : '';
+  localStorage.setItem('demoFieldOff', off ? '1' : '');
+}
+if (localStorage.getItem('demoFieldOff')) setTimeout(() => toggleField(true), 0);
+
+function drawGrid() {
+  const [nx, ny] = FIELD.grid_size;
+  const g = $('grid');
+  g.style.gridTemplateColumns = `repeat(${nx},1fr)`;
+  g.innerHTML = '';
+  const corners = Object.fromEntries(cornerCells().map(([x,y,col]) => [`${x},${y}`, col]));
+  for (let y = 0; y < ny; y++) for (let x = 0; x < nx; x++) {
+    const c = document.createElement('div');
+    c.className = 'cell'; c.dataset.x = x; c.dataset.y = y;
+    c.innerHTML = `<span class="cc">${x},${y}</span>`;
+    const col = corners[`${x},${y}`];
+    if (col) {  // те же цвета, что углы сетки на SLAM-карте
+      c.style.boxShadow = `inset 0 0 0 2px ${col}`;
+      c.style.background = col + '22';
+    }
+    c.onclick = () => clickCell(x, y);
+    g.appendChild(c);
+  }
+  $('fieldinfo').textContent =
+    `${nx}×${ny}, клетка ${FIELD.cell_size} м (${(nx*FIELD.cell_size).toFixed(2)}×${(ny*FIELD.cell_size).toFixed(2)} м)`;
+  placeBots();
+}
+
+// проходимость клеток по SLAM-карте (считает бридж): стена/неизвестно —
+// клетка гаснет с 🚫, «впритык» (стена ближе ~18см, Nav2 может не доехать) —
+// оранжевый пунктир. Углы сохраняют свой цвет.
+function applyWalkability(cells) {
+  document.querySelectorAll('#grid .cell').forEach(el => {
+    const st = (cells[+el.dataset.y] || [])[+el.dataset.x];
+    el.style.opacity = ''; el.style.outline = '';
+    el.title = '';
+    const mark = el.querySelector('.walk'); if (mark) mark.remove();
+    if (st === 'blocked' || st === 'unknown') {
+      el.style.opacity = '0.45';
+      el.title = st === 'blocked' ? 'на карте тут стена' : 'неизвестная зона карты';
+      el.insertAdjacentHTML('beforeend',
+        '<span class="walk" style="position:absolute;right:3px;bottom:1px;font-size:11px">🚫</span>');
+    } else if (st === 'tight') {
+      el.style.outline = '1px dashed var(--warn)';
+      el.title = 'впритык к стене (~18см) — Nav2 может не доехать';
+      el.insertAdjacentHTML('beforeend',
+        '<span class="walk" style="position:absolute;right:3px;bottom:1px;font-size:10px">⚠</span>');
+    }
+  });
+}
+
+const ICONS = {rover:'🚗'};
+function iconFor(id){ return ICONS[id] || '🛸'; }
+
+function placeBots() {
+  document.querySelectorAll('.bot').forEach(b => b.remove());
+  const [nx, ny] = FIELD.grid_size;
+  for (const [id, r] of Object.entries(ROBOTS)) {
+    const xy = r.pose && r.pose.xy;
+    if (!xy) continue;
+    const x = Math.max(0, Math.min(nx-1, Math.round(xy[0])));
+    const y = Math.max(0, Math.min(ny-1, Math.round(xy[1])));
+    const cell = document.querySelector(`.cell[data-x="${x}"][data-y="${y}"]`);
+    if (!cell) continue;
+    const b = document.createElement('div');
+    b.className = 'bot';
+    b.innerHTML = `${iconFor(id)}<span class="tag">${id}</span>`;
+    cell.appendChild(b);
+  }
+}
+
+function drawRobots() {
+  const d = $('robots');
+  d.innerHTML = '';
+  for (const [id, r] of Object.entries(ROBOTS)) {
+    const el = document.createElement('div');
+    el.className = 'robot' + (SEL === id ? ' sel' : '');
+    const xy = r.pose && r.pose.xy ? `[${r.pose.xy}]` : '—';
+    const busy = r.busy ? ` <span style="color:var(--warn)">🚙 ${r.busy} (${r.busy_s}с)</span>` : '';
+    el.innerHTML = `<span class="dot ${r.ok?'ok':''}"></span>
+      <span>${iconFor(id)}</span><span class="nm">${id}</span>
+      ${r.real ? '<span class="badge">REAL</span>' : ''}
+      <span class="info">${r.ok ? xy : (r.error||'недоступен')}${busy}</span>`;
+    el.onclick = () => { SEL = id; drawRobots(); };
+    d.appendChild(el);
+  }
+  if (!SEL) { SEL = Object.keys(ROBOTS)[0] || null; if (SEL) drawRobots(); }
+}
+
+async function refresh() {
+  try {
+    const r = await fetch('/demo/state');
+    const j = await r.json();
+    ROBOTS = j.robots || {};
+    const gsChanged = JSON.stringify(j.field.grid_size) !== JSON.stringify(FIELD.grid_size);
+    FIELD = j.field;
+    if (gsChanged || !$('grid').children.length) {
+      $('nx').value = FIELD.grid_size[0];
+      $('ny').value = FIELD.grid_size[1];
+      $('cs').value = FIELD.cell_size;
+      drawGrid();
+    } else placeBots();
+    drawRobots();
+  } catch (e) { /* сервер перезапускается — молча ретраим */ }
+}
+
+async function post(url, body) {
+  const r = await fetch(url, {method:'POST',
+    headers:{'content-type':'application/json','x-demo':'1'},
+    body: JSON.stringify(body)});
+  return r.json();
+}
+
+async function applyField() {
+  const gs = [parseInt($('nx').value)||5, parseInt($('ny').value)||5];
+  const cs = parseFloat($('cs').value)||0.6;
+  log(`поле → ${gs[0]}×${gs[1]}, клетка ${cs} м …`);
+  const j = await post('/demo/field', {grid_size: gs, cell_size: cs});
+  log(j.ok ? `поле применено, бриджи: ${JSON.stringify(j.pushed)}` : `ошибка: ${j.error}`,
+      j.ok ? 'o' : 'e');
+  FIELD = {grid_size: gs, cell_size: cs};
+  drawGrid();
+}
+
+async function cmd(action, args) {
+  if (!SEL) return log('робот не выбран', 'e');
+  log(`${SEL} ← ${action} ${JSON.stringify(args)}`);
+  const slow = ['goto','move','navigate'].includes(action)
+    ? setTimeout(() => log(`⏳ ${action} в пути — ответ придёт по прибытии (✋ stop прерывает)`), 3000)
+    : null;
+  try {
+    const j = await post('/demo/cmd', {robot: SEL, action, args});
+    const brief = j.result && j.result.frames
+      ? `${j.result.frames.length} кадров, финал: ${JSON.stringify(j.result.frames.at(-1))}`
+      : JSON.stringify(j.result || j.error);
+    log(`${SEL} → ${j.ok ? 'OK' : 'FAIL'} ${brief}`, j.ok ? 'o' : 'e');
+    refresh();
+  } catch (e) {
+    log(['goto','move','navigate'].includes(action)
+      ? `${SEL} → связь оборвалась, но команда ПРОДОЛЖАЕТСЯ на бридже — статус 🚙 у чипа ровера, ✋ stop прерывает`
+      : `${SEL} → сеть: ${e}`, 'e');
+  }
+  finally { if (slow) clearTimeout(slow); }
+}
+
+function cmdPhoto() {
+  const r = ROBOTS[SEL];
+  const xy = (r && r.pose && r.pose.xy) || [0, 0];
+  cmd('photograph', {cell: [Math.round(xy[0]), Math.round(xy[1])]});
+}
+
+function clickCell(x, y) {
+  const mode = $('clickmode').value;
+  if (mode === 'move') return cmd('move', {to: [x, y]});
+  if (mode === 'initial_pose') return cmd('initial_pose', {cell: [x, y]});
+  // navigate: нужен from + свободная сетка (реальные препятствия Nav2 объедет сам)
+  const r = ROBOTS[SEL];
+  const frm = (r && r.pose && r.pose.xy) ? r.pose.xy.map(Math.round) : [0, 0];
+  const [nx, ny] = FIELD.grid_size;
+  const grid = Array.from({length: ny}, () => Array(nx).fill(0));
+  cmd('navigate', {from: frm, to: [x, y], grid});
+}
+
+// ---- ровер · SLAM/локализация ----
+let SLAM = null;
+
+async function refreshSlam() {
+  if (!ROBOTS.rover) { $('slamcard').hidden = true; return; }
+  try {
+    const r = await fetch('/demo/rover_slam');
+    const j = await r.json();
+    if (!j.ok && !j.map) { $('slamcard').hidden = true; return; }
+    SLAM = j;
+    $('slamcard').hidden = false;
+    const isMapping = j.control_api === false || j.nav2_ready === false;
+    const p = j.pose || {};
+    const loc = j.localized
+      ? `<span style="color:var(--ok)">✓ локализован (amcl)</span>`
+      : isMapping
+        ? `<span style="color:var(--warn)">🟠 позицию ведёт SLAM (карта строится)</span>`
+        : `<span style="color:var(--err)">✗ НЕ локализован (${p.source||'odom'}) — задай начальную позу</span>`;
+    const lease = j.lease && j.lease.active
+      ? ` · lease: <span style="color:var(--warn)">занят</span>` : '';
+    $('slamstatus').innerHTML =
+      `карта: <b>${(j.map&&j.map.label)||'—'}</b>` +
+      (j.map && j.map.width_m ? ` (${j.map.width_m}×${j.map.height_m} м @ ${j.map.resolution} м/px)` : '') +
+      ` · ${loc} · nav2 ${j.nav2_ready?'✓':'✗'}${lease}` +
+      (p.x!==undefined ? `<br>поза: x=${(+p.x).toFixed(2)} y=${(+p.y).toFixed(2)} yaw=${(+p.yaw_deg).toFixed(1)}°` : '');
+    $('mapmode').textContent = isMapping
+      ? '🟠 КАРТИРОВАНИЕ АКТИВНО — карта достраивается' : 'навигация (full)';
+    $('mapmode').style.cssText = isMapping
+      ? 'color:var(--warn);font-weight:700' : 'color:var(--dim)';
+    $('mapbanner').hidden = !isMapping;
+    // если на экране НЕ live-картинка — геометрия кликов от сохранённой карты
+    if (!$('slammap').src.startsWith('data:') && j.map && j.map.resolution)
+      MAPGEO = {width_px: j.map.width_px, height_px: j.map.height_px,
+                resolution: j.map.resolution, origin: j.map.origin, src: 'saved'};
+    await refreshLiveMap();
+    if ($('livemap').checked && LIVEPOSE
+        && !$('slamstatus').innerHTML.includes('● LIVE'))  // не дублировать при гонке
+      $('slamstatus').innerHTML +=
+        ` · <span style="color:var(--ok)">● LIVE</span> SLAM-поза: x=${LIVEPOSE.x.toFixed(2)} y=${LIVEPOSE.y.toFixed(2)} yaw=${LIVEPOSE.yaw_deg.toFixed(1)}°`;
+    drawOverlay();
+    // первый ответ: подставить текущую калибровку сетки из бриджа ровера
+    if (j.grid && !$('gx0').dataset.init) {
+      $('gx0').dataset.init = '1';
+      $('gx0').value = j.grid.map_x0; $('gy0').value = j.grid.map_y0;
+      $('gyaw').value = j.grid.map_yaw_deg;
+    }
+  } catch (e) { /* ровер offline — карточка просто не обновится */ }
+}
+
+// ---- live-карта: тянем /map прямо с топика (растущая SLAM-карта видна
+// СРАЗУ, без «Сохранить»); геометрия из сообщения подменяет SLAM.map,
+// чтобы сетка/стрелка оставались выровнены на растущем полотне
+let liveMapTs = 0, LIVEPOSE = null;
+async function refreshLiveMap() {
+  if (!$('livemap').checked || !SLAM) return;
+  if (Date.now() - liveMapTs < 1800) return;      // не чаще ~2с (карта ~100КБ)
+  liveMapTs = Date.now();
+  try {
+    const r = await fetch('/demo/rover_livemap');
+    const j = await r.json();
+    if (!j.ok) return;                             // ещё нет сообщения — ждём
+    $('slammap').src = 'data:image/png;base64,' + j.png;
+    MAPGEO = {width_px: j.width_px, height_px: j.height_px,
+              resolution: j.resolution, origin: j.origin, src: 'live'};
+    LIVEPOSE = j.pose || null;   // поза из TF map->base_link (SLAM/amcl)
+    if (j.cells) applyWalkability(j.cells);
+  } catch (e) { /* гейтвей занят — попробуем в следующий тик */ }
+}
+
+// ---- карта: координатные преобразования + оверлей (сетка, курс) ----
+// MAPGEO = геометрия ИМЕННО ТОЙ картинки, что на экране. У live-полотна и
+// сохранённой карты РАЗНЫЕ origin/размер — если мешать их, клик по карте
+// уезжает в другую точку («едет не туда»). Гео меняется атомарно с img.src.
+let MAPGEO = null;
+function m2px(x, y) {           // метры карты -> экранные пиксели картинки
+  const m = MAPGEO, img = $('slammap');
+  const sx = img.clientWidth / m.width_px, sy = img.clientHeight / m.height_px;
+  return [ (x - m.origin[0]) / m.resolution * sx,
+           (m.height_px - (y - m.origin[1]) / m.resolution) * sy ];
+}
+function px2m(px, py) {         // экранные пиксели -> метры карты
+  const m = MAPGEO, img = $('slammap');
+  const sx = img.clientWidth / m.width_px, sy = img.clientHeight / m.height_px;
+  return [ m.origin[0] + (px / sx) * m.resolution,
+           m.origin[1] + (m.height_px - py / sy) * m.resolution ];
+}
+function mapReady() {
+  return MAPGEO && MAPGEO.resolution && MAPGEO.width_px && $('slammap').clientWidth;
+}
+
+// угловые клетки поля: одинаковые цвета на сетке слева и на SLAM-карте
+let LASTGOAL = null;
+function cornerCells() {
+  const [nx, ny] = FIELD.grid_size;
+  return [[0, 0, '#16b8f3'], [nx-1, 0, '#2ea043'],
+          [0, ny-1, '#d29922'], [nx-1, ny-1, '#f85149']];
+}
+
+function drawOverlay() {
+  const img = $('slammap'), cv = $('slamovl');
+  if (!mapReady()) { cv.width = cv.height = 0; return; }
+  cv.width = img.clientWidth; cv.height = img.clientHeight;
+  const ctx = cv.getContext('2d');
+  ctx.clearRect(0, 0, cv.width, cv.height);
+  // наша сетка поверх SLAM-карты: клетка [0,0] центром в (x0,y0), поворот yaw
+  const x0 = parseFloat($('gx0').value)||0, y0 = parseFloat($('gy0').value)||0;
+  const yaw = (parseFloat($('gyaw').value)||0) * Math.PI/180;
+  const cell = parseFloat($('cs').value)||0.6;
+  const [nx, ny] = FIELD.grid_size;
+  const c = Math.cos(yaw), s = Math.sin(yaw);
+  const g2m = (gx, gy) => [x0 + gx*c - gy*s, y0 + gx*s + gy*c];
+  ctx.strokeStyle = 'rgba(22,184,243,.65)'; ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let i = 0; i <= nx; i++) {                    // вертикали сетки
+    const gx = (i-0.5)*cell;
+    const a = m2px(...g2m(gx, -0.5*cell)), b = m2px(...g2m(gx, (ny-0.5)*cell));
+    ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]);
+  }
+  for (let j = 0; j <= ny; j++) {                    // горизонтали
+    const gy = (j-0.5)*cell;
+    const a = m2px(...g2m(-0.5*cell, gy)), b = m2px(...g2m((nx-0.5)*cell, gy));
+    ctx.moveTo(a[0], a[1]); ctx.lineTo(b[0], b[1]);
+  }
+  ctx.stroke();
+  // угловые клетки — ЦВЕТА СОВПАДАЮТ с полем слева: сразу видно, как сетка
+  // лежит на карте и куда «смотрит» поле
+  for (const [gx, gy, col] of cornerCells()) {
+    ctx.fillStyle = col + '55';
+    ctx.beginPath();
+    const cs = [[-0.5,-0.5],[0.5,-0.5],[0.5,0.5],[-0.5,0.5]];
+    const pts = cs.map(([dx,dy]) => m2px(...g2m((gx+dx)*cell, (gy+dy)*cell)));
+    ctx.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < 4; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+    ctx.closePath(); ctx.fill();
+    ctx.fillStyle = col; ctx.font = 'bold 10px sans-serif';
+    const c0 = m2px(...g2m(gx*cell, gy*cell));
+    ctx.fillText(`[${gx},${gy}]`, c0[0]+3, c0[1]-3);
+  }
+  // маркер последней цели goto — видно, КУДА реально послали ровера
+  if (LASTGOAL) {
+    const [tx, ty] = m2px(LASTGOAL.x, LASTGOAL.y);
+    ctx.strokeStyle = '#2ea043'; ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(tx-6, ty-6); ctx.lineTo(tx+6, ty+6);
+    ctx.moveTo(tx-6, ty+6); ctx.lineTo(tx+6, ty-6);
+    ctx.stroke();
+    ctx.beginPath(); ctx.arc(tx, ty, 9, 0, 7); ctx.stroke();
+  }
+  // ровер: стрелка курса (насколько ровно стоит — видно сразу); при
+  // картировании amcl спит — берём SLAM-позу из live-дампа (TF map->base_link)
+  const p = LIVEPOSE || (SLAM.localized ? SLAM.pose : null);
+  if (p && p.x !== undefined) {
+    const [rx, ry] = m2px(p.x, p.y);
+    const th = -(p.yaw_deg||0) * Math.PI/180;        // экранный y растёт вниз
+    ctx.save(); ctx.translate(rx, ry); ctx.rotate(th);
+    ctx.fillStyle = '#ff5544'; ctx.strokeStyle = '#fff'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(9,0); ctx.lineTo(-6,5); ctx.lineTo(-3,0);
+    ctx.lineTo(-6,-5); ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.restore();
+  }
+}
+
+$('mapwrap').addEventListener('click', ev => {
+  if (!mapReady()) return;
+  const r = $('slammap').getBoundingClientRect();
+  const [mx, my] = px2m(ev.clientX - r.left, ev.clientY - r.top);
+  const mode = $('mapclick').value;
+  if (mode === 'goto') {
+    SEL = 'rover'; drawRobots();
+    LASTGOAL = {x: mx, y: my}; drawOverlay();
+    log(`goto точка (${mx.toFixed(2)}, ${my.toFixed(2)})`);
+    cmd('goto', {x: +mx.toFixed(3), y: +my.toFixed(3),
+                 yaw_deg: parseFloat($('ipyaw').value)||0});
+  } else if (mode === 'initial_pose') {
+    $('ipx').value = mx.toFixed(2); $('ipy').value = my.toFixed(2);
+    setInitialPose();
+  } else if (mode === 'anchor') {
+    $('gx0').value = mx.toFixed(2); $('gy0').value = my.toFixed(2);
+    drawOverlay();
+    log(`якорь сетки [0,0] → (${mx.toFixed(2)}, ${my.toFixed(2)}) — не забудь «Записать в ровер»`, 'o');
+  }
+});
+
+async function gotoPoint() {
+  SEL = 'rover'; drawRobots();
+  await cmd('goto', {x: parseFloat($('ipx').value)||0,
+                     y: parseFloat($('ipy').value)||0,
+                     yaw_deg: parseFloat($('ipyaw').value)||0});
+  refreshSlam();
+}
+
+async function teleop(ux, uy, uw) {
+  SEL = 'rover'; drawRobots();
+  const S = parseFloat($('tspeed').value)||0.12, W = parseFloat($('tturn').value)||0.6;
+  await cmd('teleop', {vx: ux && Math.sign(ux)*S, vy: uy && Math.sign(uy)*S,
+                       wz: uw && Math.sign(uw)*W, duration_s: 0.6});
+  refreshSlam();
+}
+
+// ---- клавиатурный телеоп: WASD (вперёд/влево/назад/вправо, мекано-страйф)
+// + QE (поворот). Удержание = едет; бурсты шлются пока клавиша зажата.
+// по ev.code (KeyW и т.п.) — работает в ЛЮБОЙ раскладке (ц/ы/ф/в на русской).
+// Единичные направления; реальная скорость берётся из полей скорость/поворот.
+const KMAP = {KeyW:[1,0,0], KeyS:[-1,0,0], KeyA:[0,1,0], KeyD:[0,-1,0],
+              KeyQ:[0,0,1], KeyE:[0,0,-1]};
+let KEYS = {}, wasdOn = false, teleBusy = false, wasMoving = false;
+
+function toggleWasd() {
+  wasdOn = !wasdOn;
+  KEYS = {};
+  const b = $('wasdbtn');
+  b.style.borderColor = wasdOn ? 'var(--ok)' : '';
+  b.textContent = wasdOn ? '⌨ WASD активен (Esc — выкл)' : '⌨ WASD+QE';
+  if (wasdOn) { SEL = 'rover'; drawRobots(); log('клавиатура захвачена: WASD едем, QE крутимся, Esc — отпустить', 'o'); }
+}
+
+document.addEventListener('keydown', ev => {
+  if (ev.key === 'Escape' && wasdOn) { toggleWasd(); return; }
+  if (!wasdOn || /INPUT|SELECT|TEXTAREA/.test(ev.target.tagName)) return;
+  if (KMAP[ev.code]) { KEYS[ev.code] = 1; ev.preventDefault(); }
+});
+document.addEventListener('keyup', ev => { delete KEYS[ev.code]; });
+window.addEventListener('blur', () => { KEYS = {}; });
+
+async function sendStream(vx, vy, wz, dur) {
+  // stream-режим: бридж держит скорость фоновым воркером (8 Гц в /cmd_vel),
+  // мы только продлеваем дедлайн — езда плавная, без рывков между бурстами
+  try {
+    const j = await post('/demo/cmd', {robot:'rover', action:'teleop',
+      args:{vx, vy, wz, duration_s: dur, stream: true}});
+    if (!j.ok) log(`teleop: ${JSON.stringify(j.result||j.error)}`, 'e');
+  } catch (e) { log(`teleop сеть: ${e}`, 'e'); }
+}
+
+setInterval(async () => {
+  if (!wasdOn || teleBusy) return;
+  const S = parseFloat($('tspeed').value)||0.12, W = parseFloat($('tturn').value)||0.6;
+  const v = [0, 0, 0];
+  for (const k in KEYS) { v[0]+=KMAP[k][0]; v[1]+=KMAP[k][1]; v[2]+=KMAP[k][2]; }
+  const moving = v[0] || v[1] || v[2];
+  if (!moving && !wasMoving) return;
+  teleBusy = true;
+  try {
+    // отпустили клавиши -> короткий нулевой дедлайн = мгновенный стоп
+    await sendStream(v[0]*S, v[1]*S, v[2]*W, moving ? 0.8 : 0.15);
+    wasMoving = !!moving;
+  } finally { teleBusy = false; }
+}, 250);
+
+const MAP_CONFIRM = {
+  start: 'Перезапустить борт в профиль КАРТИРОВАНИЯ (карта С НУЛЯ)? Nav2/goto погаснут.',
+  update: 'ДОСТРОИТЬ текущую карту от текущей позы? Борт перезапустится в профиль mapping (~40с), Nav2/goto погаснут.',
+  stop: 'Вернуть борт в профиль навигации (full)? Потом нужно локализовать ровера.',
+};
+async function mappingCmd(action, confirm_) {
+  if (confirm_ && !confirm(MAP_CONFIRM[action] || action + '?')) return;
+  SEL = 'rover'; drawRobots();
+  await cmd('mapping', {action});
+  setTimeout(refreshSlam, 2000);
+}
+
+async function mappingSave() {
+  const name = $('mapname').value.trim();
+  if (!/^[A-Za-z0-9_-]{1,32}$/.test(name)) return log('имя карты: буквы/цифры/-_', 'e');
+  SEL = 'rover'; drawRobots();
+  await cmd('mapping', {action: 'save', name});
+  $('slammap').src = '/demo/rover_map.png?t=' + Date.now();
+}
+
+function poseFromRover() {
+  const p = SLAM && SLAM.pose;
+  if (!p || p.x === undefined) return log('поза ровера неизвестна', 'e');
+  $('ipx').value = (+p.x).toFixed(2);
+  $('ipy').value = (+p.y).toFixed(2);
+  $('ipyaw').value = (+p.yaw_deg).toFixed(0);
+}
+
+async function setInitialPose() {
+  SEL = 'rover'; drawRobots();
+  await cmd('initial_pose', {map: {x: parseFloat($('ipx').value)||0,
+                                   y: parseFloat($('ipy').value)||0,
+                                   yaw_deg: parseFloat($('ipyaw').value)||0}});
+  refreshSlam();
+}
+
+async function pushGridAnchor() {
+  SEL = 'rover'; drawRobots();
+  await cmd('config', {map_x0: parseFloat($('gx0').value)||0,
+                       map_y0: parseFloat($('gy0').value)||0,
+                       map_yaw_deg: parseFloat($('gyaw').value)||0,
+                       cell_size: parseFloat($('cs').value)||0.6});
+  refreshSlam();
+}
+
+setInterval(() => {   // сохранённая карта — только когда live-режим выключен
+  if (!$('slamcard').hidden && !$('livemap').checked)
+    $('slammap').src = '/demo/rover_map.png?t=' + Date.now();
+}, 5000);
+setInterval(refreshSlam, 2000);
+refreshSlam();
+
+refresh();
+setInterval(refresh, 1500);
+</script>
+</body>
+</html>

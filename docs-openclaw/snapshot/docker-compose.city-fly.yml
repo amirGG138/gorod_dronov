@@ -1,0 +1,13 @@
+# Overlay (on top of docker-compose.city.yml): point each monitor drone at its REAL
+# MAVLink bridge (fleet:900N) so the scouts PHYSICALLY fly + photograph their zone,
+# instead of posting scene-truth observations without flight. Used by
+# scripts/city_real_full.sh (fresh 4-drone MAVLink sim).
+services:
+  drone-1:
+    environment: { BRIDGE_URL: http://fleet:9001, BRIDGE_TIMEOUT: "180" }
+  drone-2:
+    environment: { BRIDGE_URL: http://fleet:9002, BRIDGE_TIMEOUT: "180" }
+  drone-3:
+    environment: { BRIDGE_URL: http://fleet:9003, BRIDGE_TIMEOUT: "180" }
+  drone-4:
+    environment: { BRIDGE_URL: http://fleet:9004, BRIDGE_TIMEOUT: "180" }

@@ -1,0 +1,7 @@
+{
+  "mode": "debate",
+  "topic": "Remote-first vs office-first engineering",
+  "question": "Should our engineering team be remote-first, office-first, or hybrid?",
+  "options": ["Remote-first", "Office-first", "Hybrid (2-3 days in office)"],
+  "notes": "Swap this file (topic/question/options) to run the debate engine on any decision. Leave options empty to let stances emerge freely and vote on those."
+}
