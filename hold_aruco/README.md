@@ -76,10 +76,30 @@ python3 -m py_compile hold_aruco.py
 ```bash
 scp -r hold_aruco sverk@<IP>:~/
 ssh sverk@<IP>
-cd ~/sverk_ws && source install/setup.bash
-ros2 run self_check selfcheck.py           # зелёные: FMU, Local position, Velocity estimation
-python3 ~/hold_aruco/hold_aruco.py 2>&1 | tee ~/log_hold.txt
+~/hold_aruco/run.sh 2>&1 | tee ~/log_hold.txt
 ```
+
+**Запускать через `run.sh`, а не `python3 hold_aruco.py` напрямую.** На борту через
+pip поставлен numpy 2.2.6 поверх системного 1.21.5, а `python3-opencv` (4.5.4)
+собран под первый, поэтому голый `import cv2` падает с
+`ImportError: numpy.core.multiarray failed to import`. Ломается не только эта
+программа — `sverk_interfaces` тоже импортирует `cv2`, то есть весь Python-API
+платформы. `run.sh` поднимает приоритет системных пакетов
+(`PYTHONPATH=/usr/lib/python3/dist-packages`) и тем чинит импорт, ничего не меняя
+в системе. Решение оставлено обходом сознательно: numpy 2 мог понадобиться
+чужому коду на этом же борту.
+
+Предполётная проверка — `selfcheck`, но **сначала надо поднять саму ноду**, в
+автозапуске её нет (иначе CLI ругается «action /self_check/run недоступен»):
+
+```bash
+source /opt/ros/*/setup.bash && source ~/sverk_ws/install/setup.bash
+ros2 run self_check self_check_node &        # нода
+ros2 run self_check selfcheck                # сам отчёт (не selfcheck.py)
+```
+
+Критично зелёное: `power_battery`, `camera_stream`, `vpe_consistency`,
+`aruco_pipeline`.
 
 Терминал должен быть виден — вывод читают судьи, в фон (`&`) не уводить.
 Ctrl+C — штатный останов: посадка идёт тем же путём, через `finally`.
@@ -87,13 +107,13 @@ Ctrl+C — штатный останов: посадка идёт тем же п
 ## Порядок первого прогона
 
 1. **Без взлёта.** Положить дрон прямо на метку, камерой вниз. Убедиться, что id
-   читается и патч `yuv` работает:
+   читается:
    ```python
    import sverk_interfaces, hold_aruco
    d = sverk_interfaces.init(Nodename="check"); hold_aruco.patch_yuv(d)
    print(hold_aruco.markers(hold_aruco.look(d)))
    ```
-   Пусто — дальше не идти: либо камера, либо словарь, либо патч.
+   Пусто — дальше не идти: либо камера, либо словарь, либо ракурс.
 2. **Перемерить метку рулеткой** и вписать в `MARKER_M`. Значение 0.25 взято из
    `docs/field-map/map.txt`, а та карта на железе ещё не сверялась. Ошибка здесь
    даёт систематический промах и «плавающую» высоту.
@@ -141,7 +161,29 @@ t= 12.6 метка  --  слепой кадр 1/20 (в кадре: нет)
    и не доезжает» — первый подозреваемый именно это.
 4. **Failsafe и KILL SWITCH** регламент требует отдельно; здесь их нет — есть
    только счётчик отказов `navigate` (5 подряд → прекращение полёта) и посадка в
-   `finally`. Для тестового полёта пульт остаётся основной страховкой.
+   `finally`. Для тестового полёта пульт остаётся основной страховкой. На борту
+   для этого есть готовые сервисы `/fmu_control/kill_switch`, `/emergency_stop`,
+   `/fmu_control/force_disarm`, `/return_to_launch` — под требование регламента
+   их и надо будет обвязывать, изобретать своё не нужно.
+
+## Что подтвердилось на живом борте
+
+Сверено 2026-07-27 на дроне `192.168.1.105` (без взлёта: selfcheck, один кадр,
+детектор на синтетике). Заменяет часть гипотез, унаследованных из «Змейки»:
+
+| Гипотеза | Как на самом деле |
+|---|---|
+| Камера отдаёт `yuv422_yuy2`, нужен патч | **`bgr8` 1280×960, 30 FPS.** Патч не нужен, но оставлен: он безвреден (пропускает кадр в штатный `to_cv2`) и страхует другую сборку |
+| OpenCV свежий, есть `ArucoDetector` | **4.5.4** — работает запасная ветка `cv2.aruco.detectMarkers(...)`. Шим из «Змейки» оказался не перестраховкой |
+| Топики ArUco как в документации (`/markers`, `/aruco_map/pose_cov`) | **Как в OpenClaw:** `/aruco/det/markers`, `/aruco/loc/pose_cov`, `/aruco/world_pose`. Расхождение из корневого `CLAUDE.md` разрешилось в пользу OpenClaw |
+| Наша карта поля на борт не залита | **Залита:** `map_markers: received (4 markers)` |
+| `auto_release` у `offboard_control` надо выставлять в `false` | Параметра на этой сборке **нет вовсе** (`Parameter not set`). Удержание позиции — целиком наша задача, что мы и делаем |
+| `selfcheck` запускается одной командой | CLI требует поднятой ноды `self_check_node`, её нет в автозапуске; исполняемый файл называется `selfcheck`, не `selfcheck.py` |
+
+Что осталось непроверенным, потому что дрон стоял не на поле: `MARKER_M`,
+знак оси Y, реальная детекция метки в кадре. Локализация (`/aruco/loc/pose_cov`)
+и VIO (`/fmu/in/vehicle_visual_odometry`) в selfcheck молчали — ожидаемо, меток в
+кадре не было; проверять над полем.
 
 ## Откуда взят код
 
