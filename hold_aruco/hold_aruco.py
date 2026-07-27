@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/home/sverk/venv_fly/bin/python3
 """Удержание дрона над ArUco-меткой: взлёт → захват метки → зависание → посадка.
 
 Тестовая программа для Обрика (ROS 2 Humble, `sverk_interfaces`). Делает ровно
@@ -27,7 +27,21 @@
 
 Перед вылетом править только блок НАСТРОЙКИ ниже.
 
-    python3 hold_aruco.py
+    ~/hold_aruco/hold_aruco.py
+
+Шебанг указывает на ~/venv_fly — отдельное окружение с numpy 1.26. Оно нужно
+потому, что на борту через pip поставлен numpy 2.2.6 поверх системного 1.21.5,
+а python3-opencv (4.5.4) собран под numpy 1.x и с двойкой падает на импорте
+(«numpy.core.multiarray failed to import»). Ломается не только эта программа —
+sverk_interfaces тоже импортирует cv2. Систему решено не трогать: numpy 2 нужен
+чужому коду на этом же борте (pid-tuning-assistant). Окружение создано так:
+
+    python3 -m venv --system-site-packages ~/venv_fly
+    ~/venv_fly/bin/pip install "numpy<2"
+
+--system-site-packages обязателен: rclpy и cv2 берутся из системы, поставить их
+через pip нельзя. Само окружение ROS (LD_LIBRARY_PATH и прочее) приходит из
+~/.bashrc, который сорсит setup.bash при интерактивном входе.
 
 Ctrl+C — штатный способ прервать: посадка идёт через тот же finally.
 """

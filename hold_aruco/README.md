@@ -76,18 +76,46 @@ python3 -m py_compile hold_aruco.py
 ```bash
 scp -r hold_aruco sverk@<IP>:~/
 ssh sverk@<IP>
-~/hold_aruco/run.sh 2>&1 | tee ~/log_hold.txt
+~/hold_aruco/hold_aruco.py 2>&1 | tee ~/log_hold.txt
 ```
 
-**Запускать через `run.sh`, а не `python3 hold_aruco.py` напрямую.** На борту через
-pip поставлен numpy 2.2.6 поверх системного 1.21.5, а `python3-opencv` (4.5.4)
-собран под первый, поэтому голый `import cv2` падает с
-`ImportError: numpy.core.multiarray failed to import`. Ломается не только эта
-программа — `sverk_interfaces` тоже импортирует `cv2`, то есть весь Python-API
-платформы. `run.sh` поднимает приоритет системных пакетов
-(`PYTHONPATH=/usr/lib/python3/dist-packages`) и тем чинит импорт, ничего не меняя
-в системе. Решение оставлено обходом сознательно: numpy 2 мог понадобиться
-чужому коду на этом же борту.
+Один файл, без обёрток. Шебанг указывает на `~/venv_fly/bin/python3` — отдельное
+окружение, см. ниже. Если шебанг почему-то не сработал («bad interpreter»), то же
+самое явно:
+
+```bash
+~/venv_fly/bin/python3 ~/hold_aruco/hold_aruco.py
+```
+
+### Зачем отдельное окружение
+
+На борту через pip поставлен numpy 2.2.6 поверх системного 1.21.5, а
+`python3-opencv` (4.5.4) собран под numpy 1.x. С двойкой `import cv2` падает:
+
+```
+ImportError: numpy.core.multiarray failed to import
+```
+
+Ломается не только эта программа — `sverk_interfaces` тоже импортирует `cv2`,
+то есть весь Python-API платформы. Систему решено не трогать: numpy 2 нужен
+чужому коду на том же борте (`pid-tuning-assistant`). Окружение создано так:
+
+```bash
+python3 -m venv --system-site-packages ~/venv_fly
+~/venv_fly/bin/pip install "numpy<2"
+```
+
+`--system-site-packages` обязателен: `rclpy` и `cv2` берутся из системы, поставить
+их через pip нельзя — `rclpy` часть ROS-сборки. numpy 1.26.4 из venv имеет
+приоритет над `/usr/local` с двойкой, а cv2 4.5.4, собранный под 1.21, с 1.26
+совместим по ABI — проверено на борту.
+
+Ставить в это окружение numpy 2 бессмысленно: сломается ровно так же. Дело не в
+том, какой numpy установлен, а в том, подо что скомпилирован бинарник OpenCV.
+
+Окружение ROS (`LD_LIBRARY_PATH` и прочее) приходит из `~/.bashrc`, который
+сорсит `setup.bash`. Работает это только в **интерактивной** сессии: в
+`ssh <host> "команда"` `.bashrc` не отрабатывает, там надо сорсить руками.
 
 Предполётная проверка — `selfcheck`, но **сначала надо поднять саму ноду**, в
 автозапуске её нет (иначе CLI ругается «action /self_check/run недоступен»):
