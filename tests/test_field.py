@@ -1,0 +1,94 @@
+import unittest
+
+from city.field import Field
+
+
+class TestGeometry(unittest.TestCase):
+    """Сверка с реальной картой маркеров docs/field-map/map.txt."""
+
+    def setUp(self):
+        self.f = Field(size=(6, 6), cell=0.8)
+
+    def test_pads_match_map_txt(self):
+        # id 50 лежит в (-1.2, +1.2) и это клетка [1,4]; id 7 — (+1.2, -1.2) = [4,1]
+        for cell, xy in (
+            ((1, 4), (-1.2, 1.2)),
+            ((4, 4), (1.2, 1.2)),
+            ((1, 1), (-1.2, -1.2)),
+            ((4, 1), (1.2, -1.2)),
+        ):
+            x, y = self.f.cell_to_m(cell)
+            self.assertAlmostEqual(x, xy[0], places=6, msg=str(cell))
+            self.assertAlmostEqual(y, xy[1], places=6, msg=str(cell))
+
+    def test_roundtrip(self):
+        for col in range(6):
+            for row in range(6):
+                x, y = self.f.cell_to_m((col, row))
+                self.assertEqual(self.f.m_to_cell(x, y), (col, row))
+
+    def test_field_fits_the_arena(self):
+        # 6 клеток по 0,8 м = 4,8 м, поле центрировано относительно начала map
+        x0, _ = self.f.cell_to_m((0, 0))
+        x1, _ = self.f.cell_to_m((5, 0))
+        self.assertAlmostEqual(x1 - x0, 4.0)  # между центрами крайних клеток
+
+    def test_yaw_origin_shifts_everything(self):
+        shifted = Field(size=(6, 6), cell=0.8, origin=(1.0, -0.5, 0.0))
+        x, y = shifted.cell_to_m((1, 4))
+        self.assertAlmostEqual(x, -0.2)
+        self.assertAlmostEqual(y, 0.7)
+
+
+class TestRouting(unittest.TestCase):
+    def setUp(self):
+        # Реальная гипотеза поля: четыре пада-крыши + три дома без маркеров
+        self.f = Field(
+            size=(6, 6),
+            cell=0.8,
+            buildings=[(1, 1), (4, 1), (1, 4), (4, 4), (3, 1), (4, 2), (2, 4)],
+        )
+
+    def test_path_goes_around_buildings(self):
+        path = self.f.astar((3, 3), (1, 3))
+        self.assertEqual(path, [(3, 3), (2, 3), (1, 3)])
+        for cell in path:
+            self.assertTrue(self.f.is_road(cell))
+
+    def test_no_path_into_building(self):
+        self.assertIsNone(self.f.astar((3, 3), (4, 2)))
+
+    def test_blocked_cell_is_avoided(self):
+        path = self.f.astar((3, 3), (1, 3), blocked=[(2, 3)])
+        self.assertIsNotNone(path)
+        self.assertNotIn((2, 3), path)
+
+    def test_no_path_when_walled_off(self):
+        walled = Field(size=(6, 6), cell=0.8, buildings=[(0, 1), (1, 1), (1, 0)])
+        self.assertIsNone(walled.astar((3, 3), (0, 0)))
+
+    def test_approach_picks_cell_nearest_to_tower(self):
+        # к горящему дому [4,2] подъезжаем со стороны башни [1,3], а не с [5,2]
+        spot = self.f.approach((4, 2), prefer=(1, 3))
+        self.assertEqual(spot, (3, 2))
+        self.assertTrue(self.f.is_road(spot))
+
+    def test_approach_none_when_surrounded(self):
+        boxed = Field(
+            size=(6, 6), cell=0.8, buildings=[(2, 2), (1, 2), (3, 2), (2, 1), (2, 3)]
+        )
+        self.assertIsNone(boxed.approach((2, 2), prefer=(0, 0)))
+
+    def test_moves_counts_hops(self):
+        self.assertEqual(Field.moves([(0, 0), (0, 1), (0, 2)]), 2)
+        self.assertEqual(Field.moves([(0, 0)]), 0)
+        self.assertEqual(Field.moves(None), 0)
+
+    def test_astar_is_deterministic(self):
+        first = self.f.astar((0, 0), (5, 5))
+        for _ in range(5):
+            self.assertEqual(self.f.astar((0, 0), (5, 5)), first)
+
+
+if __name__ == "__main__":
+    unittest.main()
