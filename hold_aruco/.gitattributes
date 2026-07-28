@@ -1,0 +1,8 @@
+# Всё в этой папке уезжает на борт (Linux) и запускается там. С CRLF шебанг
+# превращается в «/bin/bash\r» и bash отвечает «bad interpreter», а python
+# спотыкается на литералах. На Windows core.autocrlf включён, поэтому переводы
+# строк здесь закрепляются явно.
+*.sh text eol=lf
+*.py text eol=lf
+*.txt text eol=lf
+*.md text eol=lf
