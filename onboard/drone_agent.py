@@ -64,8 +64,12 @@ def say(text: str) -> None:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def patch_yuv(drone) -> bool:
-    """Научить камеру отдавать BGR: бортовая публикует yuv422_yuy2, а to_cv2 его не знает."""
+def patch_yuv(drone, color: str = "bgr") -> bool:
+    """Научить камеру отдавать картинку: бортовая может публиковать yuv422_yuy2, а to_cv2 его не знает.
+
+    Порядок каналов на выходе делаем таким же, как у штатного take_picture (см. --color),
+    иначе один и тот же кадр будет разного цвета в зависимости от сборки камеры.
+    """
     try:
         import cv2
         import numpy as np
@@ -78,19 +82,30 @@ def patch_yuv(drone) -> bool:
     if original is None:
         return False
 
+    target = cv2.COLOR_YUV2RGB_YUY2 if color == "rgb" else cv2.COLOR_YUV2BGR_YUY2
+
     def to_cv2(msg):
         if (getattr(msg, "encoding", "") or "").lower() in ("yuv422_yuy2", "yuyv", "yuv422"):
             yuv = np.frombuffer(msg.data, np.uint8).reshape((msg.height, msg.width, 2))
-            return cv2.cvtColor(yuv, cv2.COLOR_YUV2BGR_YUY2)
+            return cv2.cvtColor(yuv, target)
         return original(msg)
 
     image.to_cv2 = to_cv2
     return True
 
 
-def encode_jpeg(frame) -> bytes | None:
+def encode_jpeg(frame, color: str = "bgr") -> bytes | None:
+    """Сжать кадр в JPEG.
+
+    Порядок каналов у камеры борта — BGR, как и объявлено в топике (bgr8): проверено
+    глазами на полу известного цвета 2026-07-28. cv2.imencode ждёт ровно его, поэтому
+    по умолчанию кадр не трогаем. Флаг --color rgb оставлен на случай другой сборки
+    камеры: если на кадре красное выглядит синим, каналы надо переставить.
+    """
     import cv2
 
+    if color == "rgb":
+        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
     ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
     return buf.tobytes() if ok else None
 
@@ -132,8 +147,11 @@ class Agent:
 
         say("подключаюсь к дрону…")
         self.drone = sverk_interfaces.init(Nodename=f"agent_{self.name}")
-        self.camera_ok = patch_yuv(self.drone)
-        say(f"дрон на связи, камера {'готова' if self.camera_ok else 'НЕ ГОТОВА'}")
+        self.camera_ok = patch_yuv(self.drone, self.args.color)
+        say(
+            f"дрон на связи, камера {'готова' if self.camera_ok else 'НЕ ГОТОВА'}"
+            f" (цвет: {self.args.color})"
+        )
 
     def close(self) -> None:
         if self.drone is not None:
@@ -316,7 +334,7 @@ class Agent:
             raise NoFrame(f"камера не отдала кадр: {exc}") from exc
         if frame is None or getattr(frame, "ndim", 0) != 3 or frame.size == 0:
             raise NoFrame("камера отдала пустой кадр")
-        data = encode_jpeg(frame)
+        data = encode_jpeg(frame, self.args.color)
         if not data:
             raise NoFrame("кадр не удалось сжать в JPEG")
         self.frames += 1
@@ -451,6 +469,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--cell-size", type=float, default=0.8, help="сторона клетки, м")
     p.add_argument("--allow-goto", action="store_true", help="разрешить перелёты по полю")
     p.add_argument("--telemetry", action="store_true", help="добавлять телеметрию в статус (может виснуть)")
+    p.add_argument(
+        "--color", choices=("bgr", "rgb"), default="bgr",
+        help="порядок каналов у камеры борта: bgr — как на наших дронах (проверено), "
+             "rgb — если на кадре красное выглядит синим",
+    )
     p.add_argument("--dry", action="store_true", help="без железа: отвечать, но ничего не делать")
     return p
 
@@ -461,7 +484,19 @@ def main(argv: list[str] | None = None) -> int:
     agent.open()
 
     handler = type("Bound", (Handler,), {"agent": agent})
-    server = ThreadingHTTPServer(("0.0.0.0", args.port), handler)
+    try:
+        server = ThreadingHTTPServer(("0.0.0.0", args.port), handler)
+    except OSError as exc:
+        # Самая частая ошибка запуска: агент уже работает с прошлого раза. Голый
+        # traceback про «Address already in use» этого не объясняет.
+        say(f"ПОРТ {args.port} УЖЕ ЗАНЯТ — похоже, агент уже запущен ({exc})")
+        # Скобки в шаблоне не опечатка: без них pkill/pgrep находят и убивают
+        # собственную же команду (ssh-сессия падает с кодом 255).
+        say('  посмотреть:  pgrep -af "[d]rone_agent"')
+        say('  остановить:  pkill -9 -f "[d]rone_agent"')
+        say(f"  или запустить этот на другом порту:  --port {args.port + 1}")
+        agent.close()
+        return 1
     threading.Thread(target=agent.watchdog, daemon=True).start()
 
     say(f"агент «{args.name}» слушает порт {args.port}" + (" (ЗАГЛУШКА)" if args.dry else ""))
