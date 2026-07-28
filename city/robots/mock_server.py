@@ -21,6 +21,8 @@ from .fake import FakeDrone, FakeRover, FakeVup
 
 ROLES = {"rover": FakeRover, "drone": FakeDrone, "vup": FakeVup}
 
+DEDUP_KEEP = 64  # сколько последних command_id помнить (столько же, сколько борт)
+
 
 class Busy(Exception):
     """Аппарат занят предыдущей командой."""
@@ -29,6 +31,8 @@ class Busy(Exception):
 class _Handler(BaseHTTPRequestHandler):
     robot = None  # подставляется в serve()
     lock = threading.Lock()
+    dedup: dict = {}
+    dedup_lock = threading.Lock()
     quiet = False
 
     # --- ответы -------------------------------------------------------------
@@ -111,30 +115,59 @@ class _Handler(BaseHTTPRequestHandler):
         threading.Thread(target=worker, daemon=True).start()
         return {"accepted": True, "command": name}
 
+    def _once(self, command_id: str, run) -> dict:
+        """Повтор команды с тем же command_id получает прежний ответ, а не второй заезд.
+
+        Клиент переотправляет POST, когда потерялся ответ, а не команда. Настоящий
+        борт это различает (onboard/drone_agent.py), значит обязан и мок: иначе
+        сетевая часть отлаживается на поведении, которого на железе нет.
+        """
+        if not command_id:
+            return run()
+        with self.dedup_lock:
+            if command_id in self.dedup:
+                return {**self.dedup[command_id], "deduplicated": True}
+            result = run()
+            if result is None:  # неизвестный путь: запоминать нечего
+                return None
+            self.dedup[command_id] = result
+            while len(self.dedup) > DEDUP_KEEP:
+                del self.dedup[next(iter(self.dedup))]
+            return result
+
+    def _route(self, body: dict) -> dict | None:
+        """Разобрать команду. None — такого пути нет."""
+        # Команды движения проверяются сразу, а исполняются в фоне.
+        if self.path == "/takeoff":
+            takeoff, alt = self._method("takeoff"), float(body.get("alt", 1.5))
+            return self._accept("takeoff", lambda: takeoff(alt))
+        if self.path == "/land":
+            return self._accept("land", self._method("land"))
+        if self.path == "/goto":
+            goto = self._method("goto")
+            cell, alt = self._method("check_goto")(body["cell"]), float(body.get("alt", 1.5))
+            return self._accept("goto", lambda: goto(cell, alt))
+        if self.path == "/drive":
+            drive = self._method("drive")
+            cell = self._method("check_drive")(body["cell"])
+            return self._accept("drive", lambda: drive(cell))
+        with self.lock:
+            if self.path == "/led":
+                return self.robot.led(body.get("mode", "off"), body.get("color"))
+            if self.path == "/stop":
+                return self.robot.stop()
+        return None
+
     def do_POST(self) -> None:  # noqa: N802
         try:
             body = self._body()
-            # Команды движения проверяются сразу, а исполняются в фоне.
-            if self.path == "/takeoff":
-                takeoff, alt = self._method("takeoff"), float(body.get("alt", 1.5))
-                return self._json(200, self._accept("takeoff", lambda: takeoff(alt)))
-            if self.path == "/land":
-                return self._json(200, self._accept("land", self._method("land")))
-            if self.path == "/goto":
-                goto = self._method("goto")
-                cell, alt = self._method("check_goto")(body["cell"]), float(body.get("alt", 1.5))
-                return self._json(200, self._accept("goto", lambda: goto(cell, alt)))
-            if self.path == "/drive":
-                drive = self._method("drive")
-                cell = self._method("check_drive")(body["cell"])
-                return self._json(200, self._accept("drive", lambda: drive(cell)))
-            with self.lock:
-                if self.path == "/led":
-                    return self._json(
-                        200, self.robot.led(body.get("mode", "off"), body.get("color"))
-                    )
-                if self.path == "/stop":
-                    return self._json(200, self.robot.stop())
+            # Дедупликация идёт ДО проверок команды, а не после: к моменту повтора
+            # аппарат уже поехал по первой, и check_drive ответил бы «уже едет» —
+            # то есть отказом на команду, которая на самом деле принята.
+            cid = str(body.get("command_id") or "")
+            payload = self._once(cid, lambda: self._route(body))
+            if payload is not None:
+                return self._json(200, payload)
         except Busy as exc:
             return self._json(409, {"error": str(exc)})
         except RobotError as exc:
@@ -158,7 +191,17 @@ def serve(role: str, port: int, cell=(3, 3), name: str = "", move_time: float = 
     else:
         robot = ROLES[role](clock, cell, name=name or role)
 
-    handler = type("_Bound", (_Handler,), {"robot": robot, "lock": threading.Lock(), "quiet": quiet})
+    handler = type(
+        "_Bound",
+        (_Handler,),
+        {
+            "robot": robot,
+            "lock": threading.Lock(),
+            "dedup": {},  # свой на каждый мок: иначе моки делят память команд
+            "dedup_lock": threading.Lock(),
+            "quiet": quiet,
+        },
+    )
     server = ThreadingHTTPServer(("0.0.0.0", port), handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()

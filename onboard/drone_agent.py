@@ -18,17 +18,22 @@
 
 Что важно знать про этот файл (всё добыто на живом железе, не выдумано):
 
-* Камера отдаёт yuv422_yuy2, штатный перевод в картинку на нём падает. Без патча
-  patch_yuv не будет НИ ОДНОГО кадра. Взято из нашего же кода «Змейки»
-  (sverh_snake/Archipelago2026/fly_head.py:173).
+* Камера выданных бортов отдаёт bgr8 1280x960 — патч patch_yuv на них не нужен и
+  оставлен страховкой под сборку, публикующую yuv422_yuy2: на такой штатный
+  перевод в картинку падает и кадров не будет ни одного (sverh_snake/
+  Archipelago2026/fly_head.py:173).
 * navigate издаётся РОВНО ОДИН РАЗ на команду. Повторный вызов переинициализирует
   траекторию в контроллере, и дрон бесконечно начинает заход заново, никуда не летя.
+  Отсюда же дедупликация по command_id: повтор POST по потерянному ответу не должен
+  превращаться во второй navigate.
 * auto_arm=True всегда: без него просевший и дизармившийся дрон уже не поднимется.
 * get_telemetry на наших сборках виснет без полётного контроллера, а /status обязан
   отвечать всегда. Поэтому статус собирается из последней команды, а телеметрия —
-  только по флагу --telemetry.
+  только по флагу --telemetry и только через поток со сроком (_telemetry).
 * land() может вернуть успех и ничего не сделать, а на части сборок принимает
   timeout и без него бросает TypeError. Обе сигнатуры обёрнуты, посадка повторяется.
+  Принятая команда — это ещё не посадка, поэтому состояний два: landed (подтверждено
+  дизармом по телеметрии) и landed_unverified (команда принята, доказательств нет).
 * Монитор по полю НЕ ЛЕТАЕТ: взлетел со своей площадки, завис, снял кадр вниз, сел.
   Команда /goto есть, но без --allow-goto отвечает отказом.
 
@@ -45,7 +50,15 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.0"
+VERSION = "1.1"
+
+# Сколько последних command_id помнить, чтобы узнать повтор. Команд за попытку
+# десятки, так что помним с запасом и всё равно не растём в памяти.
+DEDUP_KEEP = 64
+
+# Состояния, означающие «дрон не в воздухе». landed — посадка подтверждена
+# телеметрией, landed_unverified — команда принята и пауза выждана, доказательств нет.
+ON_GROUND = ("idle", "landed", "landed_unverified")
 
 # Заглушка-кадр для режима --dry: настоящий, хоть и крохотный, JPEG.
 DRY_JPEG = base64.b64decode(
@@ -119,6 +132,21 @@ def encode_jpeg(frame, color: str = "bgr") -> bytes | None:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
+class Job:
+    """Одна исполняемая команда: её номер и флаг «тебя сменили».
+
+    Нужен, потому что аварийная посадка вытесняет незаконченный взлёт, а тот в этот
+    момент досыпает паузу набора высоты. Без номера проснувшийся взлёт дописал бы в
+    статус «вишу» уже после команды на посадку — и оператор увидел бы в пульте
+    летящий дрон вместо садящегося.
+    """
+
+    def __init__(self, seq: int, name: str) -> None:
+        self.seq = seq
+        self.name = name
+        self.cancel = threading.Event()
+
+
 class Agent:
     """Состояние борта и все обращения к железу. Команды исполняются по одной."""
 
@@ -129,7 +157,9 @@ class Agent:
         self.name = args.name
         self.cell = [int(v) for v in args.cell.split(",")]
         self.alt = 0.0
-        self.state = "idle"  # idle | taking_off | hover | landing | landed | error
+        # idle | taking_off | hover | landing | landed | landed_unverified
+        # | land_failed | error
+        self.state = "idle"
         self.last_error = ""
         self.frames = 0
         self.dry = args.dry
@@ -138,6 +168,10 @@ class Agent:
         self._lock = threading.Lock()
         self._busy = False
         self.current = ""
+        self._job: Job | None = None
+        self._seq = 0
+        self._done: dict[str, dict] = {}  # command_id -> уже выданный ответ
+        self._done_lock = threading.Lock()
         self._last_move = time.monotonic()
         self._last_request = time.monotonic()
 
@@ -184,52 +218,131 @@ class Agent:
         if self.last_error:
             st["last_error"] = self.last_error
         if self.args.telemetry and self.drone is not None:
-            # По умолчанию выключено: на наших сборках вызов виснет без полётного
-            # контроллера, а /status обязан отвечать всегда.
-            try:
-                tel = self.drone.control.get_telemetry(frame_id="body")
+            tel, err = self._telemetry()
+            if tel is None:
+                st["telemetry_error"] = err
+            else:
                 st["telemetry"] = {k: getattr(tel, k, None) for k in ("x", "y", "z", "armed", "mode")}
-            except Exception as exc:  # noqa: BLE001
-                st["telemetry_error"] = str(exc)
         return st
+
+    def _telemetry(self, timeout: float = 2.0):
+        """Телеметрия со сроком: вернуть (данные, ошибка).
+
+        По умолчанию выключена флагом --telemetry: на наших сборках вызов виснет без
+        полётного контроллера. Поэтому даже включённая, она читается в отдельном
+        потоке — зависший вызов не должен запирать ни /status, ни посадку. Поток
+        останется висеть до конца работы агента; это дешевле, чем немой борт.
+        """
+        box: dict = {}
+
+        def read():
+            try:
+                box["tel"] = self.drone.control.get_telemetry(frame_id="body")
+            except Exception as exc:  # noqa: BLE001 — любой отказ здесь это «нет данных»
+                box["err"] = str(exc)
+
+        worker = threading.Thread(target=read, daemon=True)
+        worker.start()
+        worker.join(timeout)
+        if "tel" in box:
+            return box["tel"], ""
+        if "err" in box:
+            return None, box["err"]
+        return None, f"телеметрия не ответила за {timeout:g} с"
 
     # --- команды ------------------------------------------------------------
 
-    def start(self, name: str, fn) -> dict:
-        """Принять команду и исполнять её в фоне: ответ по сети должен быть мгновенным."""
+    def once(self, command_id: str, run):
+        """Исполнить команду один раз на command_id: повтор получает прежний ответ.
+
+        Повтор приходит не от ошибки диспетчера, а от переотправки: ответ на POST
+        теряется в Wi-Fi чаще, чем сама команда, и клиент шлёт её заново. Для взлёта
+        это был бы второй navigate — то есть дрон, бесконечно начинающий заход
+        заново. Отказ (занят, запрещено) не запоминается: это не выполненная работа,
+        и повтор имеет право получить свежий отказ.
+        """
+        if not command_id:
+            return run()
+        with self._done_lock:  # дубль, пришедший впритык, ждёт здесь, а не летит
+            if command_id in self._done:
+                say(f"повтор команды {command_id[:8]} — второй раз не исполняю")
+                return {**self._done[command_id], "deduplicated": True}
+            result = run()
+            self._done[command_id] = result
+            while len(self._done) > DEDUP_KEEP:
+                del self._done[next(iter(self._done))]
+            return result
+
+    def start(self, name: str, fn, *, preempt: bool = False) -> dict:
+        """Принять команду и исполнять её в фоне: ответ по сети должен быть мгновенным.
+
+        preempt=True — команда важнее текущей (аварийная посадка, сторож). Прежний
+        исполнитель просыпается из паузы и уходит, ничего не записав: состояние
+        пишет только тот, чей Job сейчас лежит в self._job.
+        """
         with self._lock:
-            if self._busy:
+            if self._busy and not preempt:
                 raise Busy(f"{self.name} занят: идёт «{self.current}»")
+            if self._job is not None:
+                self._job.cancel.set()
+            self._seq += 1
+            job = self._job = Job(self._seq, name)
             self._busy = True
             self.current = name
 
         def worker():
             try:
-                fn()
+                fn(job)
             except Exception as exc:  # noqa: BLE001 — падать целиком борту нельзя
-                self.state = "error"
-                self.last_error = f"{name}: {exc}"
+                if self._job is job:
+                    self.state = "error"
+                    self.last_error = f"{name}: {exc}"
                 say(f"ОШИБКА в «{name}»: {exc}")
             finally:
-                self._busy = False
+                with self._lock:
+                    if self._job is job:
+                        self._busy = False
+                        self._job = None
 
         threading.Thread(target=worker, daemon=True).start()
         return {"accepted": True, "command": name}
+
+    def _set(self, job: Job, state: str | None = None, alt: float | None = None,
+             moved: bool = False) -> bool:
+        """Записать состояние, если эту команду не сменили. Иначе молча уйти."""
+        if self._job is not job:
+            return False
+        if state is not None:
+            self.state = state
+        if alt is not None:
+            self.alt = alt
+        if moved:
+            self._last_move = time.monotonic()
+        return True
+
+    @staticmethod
+    def _wait(job: Job, seconds: float) -> bool:
+        """Пауза, из которой можно разбудить. False — команду сменили, дальше не идём."""
+        return not job.cancel.wait(seconds)
 
     def takeoff(self, alt: float) -> dict:
         if self.state in ("taking_off", "hover"):
             # Повторная команда взлёта намеренно не доходит до navigate: второй вызов
             # переинициализирует траекторию, и дрон зависает, начиная заход заново.
-            return {"accepted": True, "note": "взлёт уже идёт или дрон в воздухе"}
-        return self.start("takeoff", lambda: self._takeoff(alt))
+            return {
+                "accepted": True,
+                "command": "takeoff",
+                "note": "взлёт уже идёт или дрон в воздухе",
+            }
+        return self.start("takeoff", lambda job: self._takeoff(alt, job))
 
-    def _takeoff(self, alt: float) -> None:
+    def _takeoff(self, alt: float, job: Job) -> None:
         alt = min(float(alt), self.args.max_alt)
-        self.state = "taking_off"
+        self._set(job, state="taking_off")
         self.last_error = ""
         say(f"ВЗЛЁТ на {alt:g} м")
         if self.dry:
-            time.sleep(2.0)
+            wait = 2.0
         else:
             # Ровно один navigate: повторный вызов переинициализирует траекторию.
             resp = self.drone.control.navigate(
@@ -242,23 +355,26 @@ class Agent:
                 raise RuntimeError(f"взлёт не принят: {getattr(resp, 'message', '')}")
             # Ждём набор высоты плюс время на успокоение: командовать раскачанным
             # дроном нельзя, и кадр с качающегося борта смазан.
-            time.sleep(alt / max(self.args.climb_speed, 0.05) + self.args.settle)
-        self.alt = alt
-        self._last_move = time.monotonic()
-        self.state = "hover"
+            wait = alt / max(self.args.climb_speed, 0.05) + self.args.settle
+        # Высота записывается до паузы: если взлёт вытеснит аварийная посадка, дрон
+        # всё равно уже пошёл вверх, и врать про ноль в статусе хуже, чем оценить.
+        # А since_move отсчитывается от конца набора: «когда двигался в последний раз».
+        self._set(job, alt=alt)
+        if not self._wait(job, wait):
+            say("взлёт прерван более важной командой — состояние не трогаю")
+            return
+        self._set(job, state="hover", moved=True)
         say(f"вишу на {alt:g} м")
 
     def land(self) -> dict:
         return self.start("land", self._land)
 
-    def _land(self) -> None:
-        self.state = "landing"
+    def _land(self, job: Job) -> None:
+        self._set(job, state="landing")
         say("ПОСАДКА")
         if self.dry:
-            time.sleep(2.0)
-            self.alt = 0.0
-            self._last_move = time.monotonic()
-            self.state = "landed"
+            self._wait(job, 2.0)
+            self._set(job, state="landed", alt=0.0, moved=True)
             return
         for attempt in range(1, 4):
             try:
@@ -268,23 +384,45 @@ class Agent:
                     resp = self.drone.control.land(timeout=10.0)
             except Exception as exc:  # noqa: BLE001
                 say(f"посадка: попытка {attempt} сорвалась — {exc}")
-                time.sleep(1.0)
+                if not self._wait(job, 1.0):
+                    return
                 continue
             ok = getattr(resp, "success", True)
             say(f"посадка: попытка {attempt} — {ok} {getattr(resp, 'message', '')}")
             if ok:
-                time.sleep(self.args.land_wait)
-                self.alt = 0.0
-                self._last_move = time.monotonic()
-                # Подтвердить посадку нечем (телеметрии не доверяем, камера смотрит
-                # вниз в пол), поэтому состояние честное: команда принята и отработана.
-                self.state = "landed"
-                say("сел (по факту принятой команды; глазами подтвердить обязательно)")
+                self._wait(job, self.args.land_wait)  # снижение идёт и после вытеснения
+                self._set(job, alt=0.0, moved=True)
+                confirmed, how = self._on_ground()
+                self._set(job, state="landed" if confirmed else "landed_unverified")
+                say(f"сел: {how}")
                 return
-            time.sleep(1.0)
-        self.state = "land_unconfirmed"
-        self.last_error = "посадка не подтверждена: сажайте пультом"
-        say("ПОСАДКА НЕ ПОДТВЕРЖДЕНА — сажайте пультом")
+            if not self._wait(job, 1.0):
+                return
+        self._set(job, state="land_failed")
+        self.last_error = "борт не принял команду на посадку: сажайте пультом"
+        say("ПОСАДКА НЕ ПРИНЯТА БОРТОМ — сажайте пультом")
+
+    def _on_ground(self) -> tuple[bool, str]:
+        """Есть ли доказательство, что дрон на земле, и какое.
+
+        Единственный доступный на борту признак — дизарм в телеметрии. Она включается
+        флагом --telemetry, то есть только там, где оператор уже убедился, что вызов
+        не виснет. Без неё честный ответ — «доказательств нет»: принятая команда и
+        выжданная пауза посадкой не являются, land() умеет вернуть успех и ничего
+        не сделать.
+        """
+        if not self.args.telemetry:
+            return False, (
+                "команда принята и пауза выждана, подтверждения нет "
+                "(телеметрия выключена) — проверьте глазами"
+            )
+        tel, err = self._telemetry()
+        if tel is None:
+            return False, f"подтвердить нечем: телеметрия молчит ({err}) — проверьте глазами"
+        armed = getattr(tel, "armed", None)
+        if armed is False:
+            return True, "подтверждено телеметрией: дрон дизармлен"
+        return False, f"телеметрия отвечает, но armed={armed} — дрон, похоже, ещё в воздухе"
 
     def goto(self, cell, alt: float) -> dict:
         if not self.args.allow_goto:
@@ -294,7 +432,7 @@ class Agent:
             )
         if self.state != "hover":
             raise Refused("перелёт до взлёта")
-        return self.start("goto", lambda: self._goto(cell, alt))
+        return self.start("goto", lambda job: self._goto(cell, alt, job))
 
     def cell_to_m(self, cell) -> tuple[float, float]:
         """Клетка поля -> метры кадра aruco_map.
@@ -307,12 +445,12 @@ class Agent:
         size = self.args.cell_size
         return ((cell[0] - (cols - 1) / 2.0) * size, (cell[1] - (rows - 1) / 2.0) * size)
 
-    def _goto(self, cell, alt: float) -> None:
+    def _goto(self, cell, alt: float, job: Job) -> None:
         x, y = self.cell_to_m(cell)
         alt = min(float(alt), self.args.max_alt)
         say(f"перелёт в клетку {list(cell)} = ({x:.2f}, {y:.2f}) м на {alt:g} м")
         if self.dry:
-            time.sleep(2.0)
+            wait = 2.0
         else:
             resp = self.drone.control.navigate(
                 x=x, y=y, z=alt, yaw=0.0, speed=self.args.speed,
@@ -320,11 +458,12 @@ class Agent:
             )
             if resp is not None and not getattr(resp, "success", True):
                 raise RuntimeError(f"перелёт не принят: {getattr(resp, 'message', '')}")
-            time.sleep(self.args.hop_wait)
+            wait = self.args.hop_wait
+        if not self._wait(job, wait):
+            say("перелёт прерван более важной командой — клетку не переписываю")
+            return
         self.cell = [int(cell[0]), int(cell[1])]
-        self.alt = alt
-        self._last_move = time.monotonic()
-        self.state = "hover"
+        self._set(job, state="hover", alt=alt, moved=True)
 
     def shot(self) -> bytes:
         if self.dry:
@@ -345,10 +484,16 @@ class Agent:
         return data
 
     def stop(self) -> dict:
-        """Аварийная остановка: для дрона это немедленная посадка."""
+        """Аварийная остановка: для дрона это немедленная посадка.
+
+        Команда вытесняет текущую. Прерванный взлёт или перелёт просыпается из паузы
+        и уходит, не тронув состояние: иначе досыпающий взлёт написал бы «вишу» уже
+        поверх посадки. Отменить сам navigate, который в этот момент отрабатывает
+        полётный контроллер, отсюда нечем — на что похожа посадка поверх живого
+        navigate у Сверх, проверяется только полётом (hold_aruco/README.md).
+        """
         say("СТОП — сажусь")
-        self._busy = False  # аварийная команда важнее текущей
-        return self.start("stop-land", self._land)
+        return self.start("stop-land", self._land, preempt=True)
 
     # --- сторож -------------------------------------------------------------
 
@@ -366,10 +511,9 @@ class Agent:
             if quiet > limit and self.state in ("taking_off", "hover"):
                 say(f"СТОРОЖ: {quiet:.0f} с без команд с ноутбука — сажусь сам")
                 self._last_request = time.monotonic()
-                try:
-                    self.start("watchdog-land", self._land)
-                except Busy:
-                    pass
+                # Вытесняет, а не встаёт в очередь: посадка по Failsafe не должна
+                # ждать, пока доиграет взлёт, из-за которого дрон и висит.
+                self.start("watchdog-land", self._land, preempt=True)
 
 
 class Busy(Exception):
@@ -433,17 +577,20 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         self.agent.touch()
         body = self._body()
+        # command_id ставит клиент и повторяет его при переотправке. Тела без него
+        # исполняются как раньше: curl с руки никакого id не шлёт.
+        cid = str(body.get("command_id") or "")
         try:
             if self.path == "/takeoff":
-                return self._json(200, self.agent.takeoff(body.get("alt", self.agent.args.alt)))
+                alt = body.get("alt", self.agent.args.alt)
+                return self._json(200, self.agent.once(cid, lambda: self.agent.takeoff(alt)))
             if self.path == "/land":
-                return self._json(200, self.agent.land())
+                return self._json(200, self.agent.once(cid, self.agent.land))
             if self.path == "/goto":
-                return self._json(
-                    200, self.agent.goto(body["cell"], body.get("alt", self.agent.args.alt))
-                )
+                cell, alt = body["cell"], body.get("alt", self.agent.args.alt)
+                return self._json(200, self.agent.once(cid, lambda: self.agent.goto(cell, alt)))
             if self.path == "/stop":
-                return self._json(200, self.agent.stop())
+                return self._json(200, self.agent.once(cid, self.agent.stop))
         except Busy as exc:
             return self._json(409, {"error": str(exc)})
         except Refused as exc:
@@ -510,9 +657,15 @@ def main(argv: list[str] | None = None) -> int:
         server.serve_forever()
     except KeyboardInterrupt:
         say("остановка по Ctrl+C")
-        if agent.state in ("taking_off", "hover"):
+        if agent.state not in ON_GROUND:
             say("дрон в воздухе — сажаю перед выходом")
-            agent._land()
+            agent.stop()
+            # Посадка идёт в фоновом потоке, а он демон: выйти раньше, чем дрон
+            # сядет, значит бросить его в воздухе.
+            deadline = time.monotonic() + args.land_wait + 10.0
+            while agent.state not in ON_GROUND and time.monotonic() < deadline:
+                time.sleep(0.2)
+            say(f"состояние на выходе: {agent.state}")
     finally:
         server.server_close()
         agent.close()

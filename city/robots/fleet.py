@@ -6,11 +6,15 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from typing import Any
 
 from .base import RobotError
 from .fake import FakeDrone, FakeRover, FakeVup
 from .http_robot import HttpRobot, wait_online
+
+STOP_TIMEOUT = 8.0  # сколько ждать «стоп» от одного аппарата, с
 
 
 class Fleet:
@@ -52,12 +56,50 @@ class Fleet:
             report.append(entry)
         return report
 
-    def stop_all(self) -> None:
-        for robot in self.all():
+    def stop_all(self) -> list[dict[str, Any]]:
+        """Аварийная остановка всех аппаратов. Возвращает, кого удалось остановить.
+
+        Два правила, оба выведены из того, что это аварийный путь:
+
+        * ошибки не глушатся. Аппарат, не принявший «стоп», — это повод жать KILL
+          SWITCH руками, и молчание здесь опаснее любого исключения. Отказ одного
+          при этом не отменяет остановку остальных, поэтому он попадает в отчёт,
+          а не наверх;
+        * команды уходят параллельно. По сети каждая ждёт ответа секундами, а
+          останавливать аппараты по очереди в аварии — это терять их друг за другом.
+        """
+        robots = self.all()
+        report: list[dict[str, Any]] = [
+            {
+                "name": getattr(r, "name", "?"),
+                "role": getattr(r, "role", "?"),
+                "stopped": False,
+                "error": f"аппарат не ответил на «стоп» за {STOP_TIMEOUT:g} с",
+            }
+            for r in robots
+        ]
+
+        def stop_one(entry: dict[str, Any], robot) -> None:
             try:
                 robot.stop()
-            except Exception:  # noqa: BLE001 — на аварийной остановке глушим всё
-                pass
+            except Exception as exc:  # noqa: BLE001 — отказ любого рода это «не остановлен»
+                entry["error"] = str(exc)
+            else:
+                entry["stopped"] = True
+                entry.pop("error", None)
+
+        threads = [
+            threading.Thread(target=stop_one, args=(entry, robot), daemon=True)
+            for entry, robot in zip(report, robots)
+        ]
+        for t in threads:
+            t.start()
+        # Срок общий на всех: потоки стартовали вместе, значит и истекает он вместе,
+        # а не по STOP_TIMEOUT на каждого по очереди.
+        deadline = time.monotonic() + STOP_TIMEOUT
+        for t in threads:
+            t.join(max(0.0, deadline - time.monotonic()))
+        return report
 
 
 def _monitors_enabled(cfg) -> list[str]:

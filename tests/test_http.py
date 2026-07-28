@@ -5,12 +5,24 @@
 это вылезет полётом, а не сообщением.
 """
 
+import json
 import time
 import unittest
+import urllib.request
 
 from city.robots.base import RobotError
 from city.robots.http_robot import HttpRobot, wait_online
 from city.robots.mock_server import serve
+
+
+def post(url: str, path: str, body: dict) -> dict:
+    """POST мимо HttpRobot: он ставит новый command_id на каждый вызов, а нам нужен тот же."""
+    req = urllib.request.Request(
+        f"{url}{path}", data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"}, method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        return json.loads(resp.read())
 
 
 def wait_until(robot, check, timeout=5.0):
@@ -92,6 +104,30 @@ class TestRover(HttpCase):
 
     def test_stop(self):
         self.assertTrue(self.robot.stop()["accepted"])
+
+    def test_resent_command_is_answered_not_repeated(self):
+        """Теряется чаще ответ, а не команда: повтор с тем же id — не второй заезд.
+
+        Без дедупликации повтор либо уезжает второй раз, либо получает 409 «занят»
+        на свою же собственную команду — и диспетчер считает попытку сорванной.
+        """
+        slow, mock = serve("rover", 0, (3, 3), move_time=0.5, quiet=True)
+        try:
+            url = f"http://127.0.0.1:{slow.server_address[1]}"
+            body = {"cell": [3, 2], "command_id": "same-id"}
+            self.assertTrue(post(url, "/drive", body)["accepted"])
+            self.assertTrue(post(url, "/drive", body)["deduplicated"])
+            robot = HttpRobot(url)
+            wait_until(robot, lambda st: not st["busy"], timeout=5)
+            self.assertEqual(robot.status()["cell"], [3, 2])
+        finally:
+            slow.shutdown()
+            slow.server_close()
+
+    def test_command_without_id_still_works(self):
+        """curl с руки никакого id не шлёт — контракт обязан это пережить."""
+        url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        self.assertTrue(post(url, "/drive", {"cell": [3, 2]})["accepted"])
 
 
 class TestDrone(HttpCase):

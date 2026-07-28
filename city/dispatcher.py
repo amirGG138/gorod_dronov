@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from typing import Any, Sequence
 
 from .field import Cell, Field, as_cell
@@ -30,6 +31,10 @@ from .rules import (
 
 MONITOR_ALT = 1.5  # рабочая высота дрона-монитора, м (потолок 4 м, регламент 2.6)
 VUP_ALT = 0.7  # рабочая высота ВУП, м
+# Состояния борта, означающие «дрон не в воздухе». landed_unverified — посадка, за
+# которую борт не поручился (onboard/drone_agent.py): ждать её надо как посадки, а
+# писать в лог — как неподтверждённую.
+ON_GROUND = ("landed", "landed_unverified", "idle")
 MOVE_TOLERANCE = 0.25  # допуск на дрожание сети при проверке «не двигался», с
 CONNECT_WAIT = 10.0  # сколько ждать ответа борта при старте, с (ROS поднимается небыстро)
 DRIVE_TIMEOUT = 30.0  # сколько ждать переезда ровера в соседнюю клетку, с
@@ -93,15 +98,28 @@ class Dispatcher:
 
             self.precharge(budget, budget_reason)
             self.execute(actions)
+        except KeyboardInterrupt:
+            # Ctrl+C посреди попытки — это человек, а не сбой; аппараты об этом не
+            # знают и продолжают лететь и ехать, пока им не сказали обратное.
+            self.log.ev("ERROR", error="KeyboardInterrupt", reason="попытку прервали с клавиатуры")
+            self.emergency_stop("попытку прервал оператор")
+            return 1
         except (RouteBlocked, EnergyError, MissionFailed) as exc:
             self.log.ev("ERROR", error=type(exc).__name__, reason=str(exc))
-            self.fleet.stop_all()
+            self.emergency_stop("план сорвался — глушим все аппараты")
             return 1
         except RobotError as exc:
             self.log.ev("ERROR", error="RobotError", reason=str(exc))
-            self.log.ev("SAFETY", action="stop_all", reason="отказ борта — глушим все аппараты")
-            self.fleet.stop_all()
+            self.emergency_stop("отказ борта — глушим все аппараты")
             return 1
+        except Exception as exc:  # noqa: BLE001 — сбой диспетчера не повод бросать аппараты
+            self.log.ev(
+                "ERROR",
+                error=type(exc).__name__,
+                reason=f"непредвиденный сбой диспетчера: {exc}",
+            )
+            self.emergency_stop("непредвиденный сбой диспетчера")
+            raise  # трассировка нужна: это наша ошибка, и её надо увидеть целиком
 
         ok = "fire" in self.done_missions
         self.log.ev(
@@ -112,6 +130,36 @@ class Dispatcher:
             reason="попытка завершена" if ok else "попытка завершена не полностью",
         )
         return 0 if ok else 1
+
+    def emergency_stop(self, why: str) -> list[dict[str, Any]]:
+        """Остановить всё и записать, кого остановить не удалось.
+
+        Раньше отказ на «стоп» глушился молча, и лог аварии выглядел так же, как
+        лог успешной остановки. Аппарат, не принявший команду, — единственный повод
+        жать KILL SWITCH руками, поэтому он попадает и в лог, и на экран: сообщение
+        идёт в stderr, чтобы его было видно даже при запуске с --quiet.
+        """
+        report = self.fleet.stop_all()
+        failed = [e["name"] for e in report if not e["stopped"]]
+        self.log.ev(
+            "SAFETY",
+            action="stop_all",
+            robots=report,
+            failed=failed,
+            reason=(
+                f"{why}; не остановлены: {', '.join(failed)}"
+                if failed
+                else f"{why}; остановлены все ({len(report)})"
+            ),
+        )
+        if failed:
+            print(
+                "\n!!! НЕ ОСТАНОВЛЕНЫ: " + ", ".join(failed) + "\n"
+                "!!! ЖМИТЕ KILL SWITCH РУКАМИ — команда до аппарата не дошла\n",
+                file=sys.stderr,
+                flush=True,
+            )
+        return report
 
     def connect(self) -> None:
         """Перекличка бортов до старта: кто ответил, где стоит и не заглушка ли он."""
@@ -143,6 +191,7 @@ class Dispatcher:
             self.log.ev(
                 "SURVEY",
                 source="config",
+                scenario_source="config",
                 fire=list(self.sc.fire_cell),
                 fire_level=self.sc.fire_level,
                 reason="дроны-мониторы выключены, сцена взята из config.yaml",
@@ -151,14 +200,12 @@ class Dispatcher:
     def _survey_by_drones(self) -> None:
         """Взлёт-кадр-посадка по всем мониторам. Разбор кадров — этап 3."""
         paths: list[str] = []
+        unverified: list[str] = []
         for name, drone in self.fleet.monitors.items():
             try:
                 drone.takeoff(MONITOR_ALT)
                 self._wait_state(drone, ("hover",), timeout=20.0)
-                frame = drone.shot()
-                paths.append(self.save_shot(name, frame))
-                drone.land()
-                self._wait_state(drone, ("landed", "idle"), timeout=25.0)
+                paths.append(self.save_shot(name, drone.shot()))
             except RobotError as exc:
                 self.log.ev(
                     "ERROR",
@@ -166,18 +213,45 @@ class Dispatcher:
                     drone=name,
                     reason=f"монитор {name} не отдал кадр: {exc}",
                 )
+            finally:
+                # Посадка обязательна, чем бы ни кончилась съёмка: сорвавшийся кадр
+                # оставлял монитор висеть над полем до срабатывания сторожа борта.
+                if self._park(drone, name) == "landed_unverified":
+                    unverified.append(name)
         self.log.ev(
             "SURVEY",
             source="drones",
+            scenario_source="config",
             shots=len(paths),
             files=paths,
+            landing_unverified=unverified,
             fire=list(self.sc.fire_cell),
             fire_level=self.sc.fire_level,
             reason=(
                 f"снято кадров: {len(paths)}; разбор кадров появится на этапе 3, "
-                "пока сцена всё ещё из config.yaml"
+                "поэтому клетка и уровень пожара всё ещё взяты из config.yaml, "
+                "а не с этих кадров"
+                + (f"; посадку не подтвердили: {', '.join(unverified)}" if unverified else "")
             ),
         )
+
+    def _park(self, drone, name: str) -> str:
+        """Посадить монитор и вернуть состояние, в котором он остался."""
+        try:
+            state = drone.status().get("state")
+            if state in ON_GROUND:
+                return state
+            drone.land()
+            self._wait_state(drone, ON_GROUND, timeout=25.0)
+            return drone.status().get("state")
+        except RobotError as exc:
+            self.log.ev(
+                "SAFETY",
+                action="land",
+                drone=name,
+                reason=f"монитор {name} остался в воздухе: {exc}",
+            )
+            return "unknown"
 
     def save_shot(self, name: str, frame: bytes) -> str:
         """Кадр на диск: это и материал техзащиты, и способ увидеть, что снял дрон."""
@@ -388,9 +462,10 @@ class Dispatcher:
         self._wait_state(vup, ("hover",), timeout=20.0)
         vup.goto(self.sc.fire_cell, VUP_ALT)
         self._wait_state(vup, ("hover",), timeout=30.0)
-        self.save_shot("vup", vup.shot())
-        vup.land()
-        self._wait_state(vup, ("landed", "idle"), timeout=25.0)
+        try:
+            self.save_shot("vup", vup.shot())
+        finally:
+            self._park(vup, "vup")
         self.log.ev(
             "PERSON_FOUND",
             found=None,

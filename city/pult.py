@@ -155,7 +155,9 @@ def tail_log(host: str, log: str, stop: threading.Event) -> None:
 def show_status(drone: HttpRobot) -> dict:
     st = drone.status()
     words = {"idle": "стоит на земле", "taking_off": "взлетает", "hover": "висит",
-             "landing": "садится", "landed": "сел", "error": "ОШИБКА"}
+             "landing": "садится", "landed": "сел (подтверждено)",
+             "landed_unverified": "сел, но борт не поручился — посмотрите глазами",
+             "land_failed": "ПОСАДКА НЕ ПРИНЯТА БОРТОМ", "error": "ОШИБКА"}
     say(f"{words.get(st.get('state'), st.get('state'))}, "
         f"высота {st.get('alt', 0):.1f} м, клетка {st.get('cell')}, "
         f"камера {'готова' if st.get('camera') else 'НЕ ГОТОВА'}")
@@ -176,16 +178,18 @@ def take_shot(drone: HttpRobot, counter: list[int]) -> None:
         subprocess.run(["open", path], capture_output=True)
 
 
-def wait_state(drone: HttpRobot, want: str, seconds: float) -> bool:
+def wait_state(drone: HttpRobot, want: tuple[str, ...], seconds: float) -> str:
+    """Дождаться одного из состояний. Возвращает какое; пустая строка — не дождались."""
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
         try:
-            if drone.status().get("state") == want:
-                return True
+            state = drone.status().get("state", "")
+            if state in want:
+                return state
         except RobotError:
             pass
         time.sleep(0.5)
-    return False
+    return ""
 
 
 def do_takeoff(drone: HttpRobot, alt: float, confirmed: list[bool]) -> None:
@@ -198,8 +202,8 @@ def do_takeoff(drone: HttpRobot, alt: float, confirmed: list[bool]) -> None:
         confirmed[0] = True
     say(f"команда на взлёт, высота {alt:g} м")
     drone.takeoff(alt)
-    say("жду, пока встанет в воздухе…" if wait_state(drone, "hover", 25) else "")
-    if drone.status().get("state") == "hover":
+    say("жду, пока встанет в воздухе…")
+    if wait_state(drone, ("hover",), 25):
         say("дрон висит — можно снимать кадр")
     else:
         say("ВНИМАНИЕ: подъём не подтвердился, смотрите строки борта выше")
@@ -208,8 +212,14 @@ def do_takeoff(drone: HttpRobot, alt: float, confirmed: list[bool]) -> None:
 def do_land(drone: HttpRobot) -> None:
     say("команда на посадку")
     drone.land()
-    if wait_state(drone, "landed", 25):
-        say("дрон сел")
+    # «landed» борт пишет только при доказанной посадке (дизарм по телеметрии),
+    # «landed_unverified» — когда команда принята, а доказательств нет. Врать
+    # оператору «дрон сел» во втором случае нельзя: он на это смотреть не пойдёт.
+    state = wait_state(drone, ("landed", "landed_unverified"), 25)
+    if state == "landed":
+        say("дрон сел — посадка подтверждена бортом")
+    elif state == "landed_unverified":
+        say("борт отработал посадку, но подтвердить её нечем — ПОСМОТРИТЕ НА ДРОН")
     else:
         say("ПОСАДКА НЕ ПОДТВЕРЖДЕНА — сажайте пультом, команд больше не давайте")
 
@@ -265,8 +275,9 @@ def shutdown(drone, host: str, agent_proc, stop: threading.Event, keep: bool) ->
             if drone.status().get("state") in ("taking_off", "hover"):
                 say("дрон в воздухе — сажаю перед выходом")
                 do_land(drone)
-        except RobotError:
-            pass
+        except RobotError as exc:
+            # Молчать нельзя: мы выходим, а дрон, возможно, остался в воздухе.
+            say(f"ВНИМАНИЕ: не удалось посадить дрон перед выходом ({exc}) — сажайте пультом")
     stop.set()
     if keep:
         say("программа на борту оставлена работать (--keep)")

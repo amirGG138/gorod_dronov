@@ -14,6 +14,7 @@ import json
 import time
 import urllib.error
 import urllib.request
+import uuid
 from typing import Any, Sequence
 
 from .base import RobotError
@@ -34,6 +35,11 @@ class HttpRobot:
     # --- транспорт ----------------------------------------------------------
 
     def _request(self, method: str, path: str, body: dict | None = None, raw: bool = False):
+        if method == "POST":
+            # Один и тот же command_id на все попытки одной команды. Повторяем мы
+            # молча, по потерянному ответу, — а борт по этому id узнаёт, что уже
+            # исполняет её, и не издаёт второй navigate (второй взлёт).
+            body = {**(body or {}), "command_id": uuid.uuid4().hex}
         data = json.dumps(body).encode("utf-8") if body is not None else None
         headers = {"Content-Type": "application/json"} if data else {}
         last: Exception | None = None
