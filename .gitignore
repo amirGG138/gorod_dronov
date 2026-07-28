@@ -4,3 +4,7 @@ __pycache__/
 .playwright-mcp/
 venv/
 logs/
+# Локальный набор для прошивки Обрика на Windows (клон KVALNF95/obrik-tools
+# с правками под Windows, плюс zadig и dfu-util). Чужой апстрим и ~7 МБ .exe —
+# в историю репозитория не кладём.
+obrik-tools-Windows/
