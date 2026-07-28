@@ -9,10 +9,12 @@
 
 from __future__ import annotations
 
+import math
 import os
 import sys
 from typing import Any, Sequence
 
+from . import vision
 from .field import Cell, Field, as_cell
 from .log import Log
 from .robots.base import RobotError
@@ -57,6 +59,14 @@ class Dispatcher:
         self.fire_done = False
         self.done_missions: list[str] = []
         self.poll = float(cfg.get("sim.poll", 0.2))
+        # Разведка: куда лететь и как разбирать кадры. Настройки читаются один раз,
+        # чтобы на площадке правился только config.yaml, а не код.
+        self.pads = vision.pads_from_config(cfg)
+        self.vision_settings = vision.settings(cfg)
+        self.survey_alt = float(cfg.get("survey.alt", MONITOR_ALT))
+        # Мониторы, чья посадка не подтвердилась: попадают в лог разведки, чтобы
+        # «сел» на пульте не расходилось с тем, что видно глазами над полем.
+        self.unverified: list[str] = []
 
     # --- шаги попытки -------------------------------------------------------
 
@@ -184,7 +194,7 @@ class Dispatcher:
             raise RobotError(f"ровер не на связи, попытка не начинается: {rover['error']}")
 
     def survey(self) -> None:
-        """Откуда берётся картина поля. С этапа 3 сюда встанут кадры мониторов."""
+        """Откуда берётся картина поля: с кадров мониторов или из config.yaml."""
         if self.cfg.get("flags.use_drones", False) and self.fleet.monitors:
             self._survey_by_drones()
         else:
@@ -197,41 +207,216 @@ class Dispatcher:
                 reason="дроны-мониторы выключены, сцена взята из config.yaml",
             )
 
+    # --- разведка мониторами -------------------------------------------------
+
     def _survey_by_drones(self) -> None:
-        """Взлёт-кадр-посадка по всем мониторам. Разбор кадров — этап 3."""
-        paths: list[str] = []
-        unverified: list[str] = []
+        """Два прохода: сначала кадр с площадки, потом, если надо, облёт.
+
+        Порядок не случаен. Кадр с площадки бесплатен по времени — дрон и так
+        взлетает. Облёт стоит минуты 15-минутной попытки, поэтому включается только
+        когда с площадок очага не видно, и прекращается сразу, как только он найден.
+        """
+        seen: list[vision.Observation] = []
+        self.unverified = []
         for name, drone in self.fleet.monitors.items():
-            try:
-                drone.takeoff(MONITOR_ALT)
-                self._wait_state(drone, ("hover",), timeout=20.0)
-                paths.append(self.save_shot(name, drone.shot()))
-            except RobotError as exc:
-                self.log.ev(
-                    "ERROR",
-                    error="RobotError",
-                    drone=name,
-                    reason=f"монитор {name} не отдал кадр: {exc}",
-                )
-            finally:
-                # Посадка обязательна, чем бы ни кончилась съёмка: сорвавшийся кадр
-                # оставлял монитор висеть над полем до срабатывания сторожа борта.
-                if self._park(drone, name) == "landed_unverified":
-                    unverified.append(name)
+            self._scan_drone(name, drone, seen, offsets=())
+            if vision.merge(seen).found and self._stop_when_found():
+                break
+        scene = vision.merge(seen)
+
+        if not scene.found and self.cfg.get("survey.second_pass", True):
+            self.log.ev(
+                "SURVEY",
+                source="drones",
+                shots=len(seen),
+                stage="pass-2",
+                reason=(
+                    "с площадок очаг не виден: на рабочей высоте кадр уже́е угла поля. "
+                    "Идём облётом точек обзора с возвратом на метку"
+                ),
+            )
+            for name, drone in self.fleet.monitors.items():
+                self._scan_drone(name, drone, seen, offsets=self._offsets(name))
+                if vision.merge(seen).found and self._stop_when_found():
+                    break
+            scene = vision.merge(seen)
+
+        self._apply_scene(scene, len(seen))
+
+    def _stop_when_found(self) -> bool:
+        return bool(self.cfg.get("survey.stop_when_found", True))
+
+    def _scan_drone(self, name: str, drone, seen: list, offsets: Sequence) -> None:
+        """Взлёт -> кадр с метки -> точки обзора с возвратом на метку -> посадка."""
+        pad = as_cell(self.cfg.robots.monitors[name].pad)
+        pad_xy = self.field.cell_to_m(pad)
+        try:
+            drone.takeoff(self.survey_alt)
+            self._wait_state(drone, ("hover",), timeout=20.0)
+            if not offsets:
+                self._look_and_see(name, drone, pad_xy, seen, home=None)
+            for point in offsets:
+                self._look_and_see(name, drone, point, seen, home=pad_xy)
+                if seen and seen[-1].found and self._stop_when_found():
+                    break
+        except RobotError as exc:
+            self.log.ev(
+                "ERROR",
+                error="RobotError",
+                drone=name,
+                reason=f"монитор {name} сорвал разведку: {exc}",
+            )
+        finally:
+            # Посадка обязательна, чем бы ни кончилась съёмка: сорвавшийся кадр
+            # оставлял монитор висеть над полем до срабатывания сторожа борта.
+            if self._park(drone, name) == "landed_unverified":
+                self.unverified.append(name)
+
+    def _look_and_see(self, name: str, drone, point, seen: list, home) -> None:
+        """Слетать в точку обзора, снять кадр, разобрать его и вернуться на метку.
+
+        Возврат на метку обязателен и делается ДО разбора кадра: висеть над полем,
+        пока ноутбук считает картинку, незачем, а над меткой борт стоит устойчивее —
+        там работает локализация по ArUco.
+        """
+        if home is not None:
+            drone.look(point, self.survey_alt)
+            self._wait_state(drone, ("hover",), timeout=25.0)
+        frame = drone.shot()
+        if home is not None:
+            drone.look(home, self.survey_alt)
+            self._wait_state(drone, ("hover",), timeout=25.0)
+        seen.append(self._see(name, frame, point))
+
+    def _see(self, name: str, frame: bytes, point) -> vision.Observation:
+        """Разобрать один кадр и записать увиденное в лог — даже если не увидели ничего."""
+        path = self.save_shot(name, frame)
+        try:
+            picture = vision.decode(frame)
+            obs = vision.look(
+                picture,
+                self.field,
+                self.pads,
+                drone=name,
+                pose=point,
+                alt=self.survey_alt,
+                **self.vision_settings,
+            )
+            if obs.found:
+                self._save_marked(picture, obs, path)
+        except vision.VisionError as exc:
+            obs = vision.Observation(drone=name, note=str(exc))
+        obs.shot = path
+        self.log.ev(
+            "SCAN",
+            drone=name,
+            xy=[round(float(point[0]), 2), round(float(point[1]), 2)],
+            fire_cell=list(obs.fire_cell) if obs.fire_cell else None,
+            anchor=obs.anchor,
+            markers=obs.markers_seen,
+            area=round(obs.area, 1),
+            shot=path,
+            reason=(
+                f"очаг в клетке {list(obs.fire_cell)}, привязка кадра «{obs.anchor}»"
+                if obs.found
+                else f"очага на кадре нет: {obs.note or 'пятен нужного цвета не найдено'}"
+            ),
+        )
+        return obs
+
+    def _save_marked(self, picture, obs, path: str) -> None:
+        """Кадр с разметкой рядом с исходным: доказательство для техзащиты."""
+        try:
+            vision.draw(picture, obs, self.field, self.pads, path[:-4] + "-mark.jpg")
+        except Exception:  # noqa: BLE001 — разметка полезна, но не обязательна
+            pass
+
+    def _offsets(self, name: str) -> list[tuple[float, float]]:
+        """Точки обзора вокруг площадки монитора, в метрах поля.
+
+        В конфиге смещения записаны так, что ПЛЮС значит «в сторону центра поля».
+        Знаки разворачиваются по тому, в каком углу стоит этот дрон, поэтому один и
+        тот же список годится всем четырём.
+        """
+        pad = as_cell(self.cfg.robots.monitors[name].pad)
+        px, py = self.field.cell_to_m(pad)
+        sx = 1.0 if px <= self.field.x0 else -1.0
+        sy = 1.0 if py <= self.field.y0 else -1.0
+        half_x = self.field.cols * self.field.cell / 2.0 - self.field.cell / 4.0
+        half_y = self.field.rows * self.field.cell / 2.0 - self.field.cell / 4.0
+        points = []
+        for offset in self.cfg.get("survey.offsets", []) or []:
+            x = px + sx * float(offset[0])
+            y = py + sy * float(offset[1])
+            # Точка обзора не должна уводить дрон за поле: там ему делать нечего,
+            # а полётная зона кончается.
+            x = max(self.field.x0 - half_x, min(self.field.x0 + half_x, x))
+            y = max(self.field.y0 - half_y, min(self.field.y0 + half_y, y))
+            points.append((round(x, 3), round(y, 3)))
+        return points
+
+    def _apply_scene(self, scene: vision.Scene, shots: int) -> None:
+        """Итог разведки. Не нашли — так и пишем, а не подставляем тихо конфиг."""
+        if not scene.found:
+            self.log.ev(
+                "SURVEY",
+                source="config",
+                shots=shots,
+                fire=list(self.sc.fire_cell),
+                fire_level=self.sc.fire_level,
+                landing_unverified=self.unverified,
+                reason=(
+                    f"кадров снято {shots}, очаг ни на одном не распознан — "
+                    f"работаем по клетке из config.yaml {list(self.sc.fire_cell)}. "
+                    "Проверьте пороги цвета: python3 -m city.vision <кадр> --debug"
+                    + (
+                        f"; посадку не подтвердили: {', '.join(self.unverified)}"
+                        if self.unverified
+                        else ""
+                    )
+                ),
+            )
+            return
+
+        was = self.sc.fire_cell
+        self.sc.fire_cell = scene.fire_cell
+        # Человек по заданию — в окне ГОРЯЩЕГО здания, поэтому ВУП летит туда же.
+        self.sc.person_cell = scene.fire_cell
+        self.log.ev(
+            "FIRE_SPOTTED",
+            cell=list(scene.fire_cell),
+            votes=scene.votes,
+            total=scene.total,
+            by_cell=scene.by_cell,
+            drones=scene.drones,
+            level=self.sc.fire_level,
+            level_source="config",
+            reason=(
+                f"очаг найден по кадрам: {scene.votes} из {scene.total} за клетку "
+                f"{list(scene.fire_cell)} (дроны: {', '.join(scene.drones)}). "
+                "Уровень пожара картинкой не определяется — «огонёк» числа не несёт, "
+                f"берём заданный организаторами: {self.sc.fire_level}"
+            ),
+        )
         self.log.ev(
             "SURVEY",
             source="drones",
-            scenario_source="config",
-            shots=len(paths),
-            files=paths,
-            landing_unverified=unverified,
-            fire=list(self.sc.fire_cell),
+            shots=shots,
+            fire=list(scene.fire_cell),
             fire_level=self.sc.fire_level,
+            landing_unverified=self.unverified,
             reason=(
-                f"снято кадров: {len(paths)}; разбор кадров появится на этапе 3, "
-                "поэтому клетка и уровень пожара всё ещё взяты из config.yaml, "
-                "а не с этих кадров"
-                + (f"; посадку не подтвердили: {', '.join(unverified)}" if unverified else "")
+                f"сцена построена по кадрам мониторов"
+                + (
+                    f"; в config.yaml стояла клетка {list(was)}, побеждает найденная"
+                    if as_cell(was) != scene.fire_cell
+                    else "; совпало с config.yaml"
+                )
+                + (
+                    f"; посадку не подтвердили: {', '.join(self.unverified)}"
+                    if self.unverified
+                    else ""
+                )
             ),
         )
 
@@ -280,10 +465,15 @@ class Dispatcher:
         )
 
     def _wait_state(self, robot, states: tuple[str, ...], timeout: float) -> bool:
-        """Дождаться состояния борта. Команда принимается сразу, исполняется в фоне."""
+        """Дождаться состояния борта. Команда принимается сразу, исполняется в фоне.
+
+        Проверяется и признак busy: борт поднимает его в тот же миг, когда принимает
+        команду, поэтому «состояние ещё прежнее» не будет принято за «уже долетел».
+        """
         t0 = self.clock.now()
         while self.clock.now() - t0 < timeout:
-            if robot.status().get("state") in states:
+            st = robot.status()
+            if st.get("state") in states and not st.get("busy"):
                 return True
             self.clock.sleep(self.poll)
         raise RobotError(

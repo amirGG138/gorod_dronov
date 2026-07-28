@@ -38,11 +38,15 @@ NET_PORT = 2200
 HELP = """
 Команды (можно первой буквой):
   статус (с)        спросить, что с дроном
-  кадр   (к)        снять фотографию и открыть её
+  кадр   (к)        снять фотографию, открыть её и разобрать: где метки и очаг
+  обзор  (о) 0.5 0.5  отлететь от своей метки на столько метров, снять, вернуться
   взлет  (в) [1.5]  подняться на высоту в метрах
   сесть  (п)        посадка
   стоп              аварийная посадка немедленно
   выход  (q)        посадить, всё выключить и выйти
+
+  Ctrl+C            отменить то, чего ждём сейчас (дрон остаётся как есть);
+                    на пустой строке дважды подряд — выход
 """
 
 WARNING = """
@@ -103,6 +107,7 @@ def start_agent(host: str, args) -> tuple[str, subprocess.Popen]:
         f"{REMOTE_DIR}/run_agent.sh"
         f" --name {args.name} --cell {args.cell} --port {args.port}"
         f" --watchdog {args.watchdog} --color {args.color}"
+        f" --allow-scan --scan-radius {args.scan_radius}"
         f" </dev/null >{log} 2>&1"
     )
     proc = subprocess.Popen(
@@ -174,8 +179,79 @@ def take_shot(drone: HttpRobot, counter: list[int]) -> None:
     with open(path, "wb") as fh:
         fh.write(frame)
     say(f"кадр сохранён: {path} ({len(frame) // 1024} КБ)")
+    marked = explain_shot(frame, path, drone)
     if sys.platform == "darwin":
-        subprocess.run(["open", path], capture_output=True)
+        subprocess.run(["open", marked or path], capture_output=True)
+
+
+def explain_shot(frame: bytes, path: str, drone: HttpRobot) -> str:
+    """Разобрать кадр тем же зрением, что и диспетчер, и сказать результат словами.
+
+    Это и есть способ настроить зрение на площадке: сняли кадр — сразу видно, нашлись
+    ли метки, взялась ли привязка и распознан ли «огонёк». Пороги правятся в
+    city/config.yaml, раздел vision.
+    """
+    try:
+        from . import config as config_mod
+        from . import vision
+        from .field import Field
+
+        cfg = config_mod.load()
+        picture = vision.decode(frame)
+        pose = drone.status().get("xy")
+        obs = vision.look(
+            picture, Field.from_config(cfg), vision.pads_from_config(cfg),
+            drone="пульт", pose=pose, alt=float(drone.status().get("alt") or 1.5),
+            **vision.settings(cfg),
+        )
+    except Exception as exc:  # noqa: BLE001 — пульт не должен падать из-за разбора кадра
+        say(f"разобрать кадр не вышло: {exc}")
+        return ""
+    say(f"метки на кадре: {obs.markers_seen or 'нет'}; привязка: {obs.anchor}")
+    if obs.found:
+        say(f"ОЧАГ виден в клетке {list(obs.fire_cell)} (пятно {int(obs.area)} пикселей)")
+    else:
+        say(f"очага не видно: {obs.note}")
+    marked = path[:-4] + "-mark.jpg"
+    try:
+        from . import vision as _v
+
+        return _v.draw(picture, obs, Field.from_config(cfg), _v.pads_from_config(cfg), marked)
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def do_look(drone: HttpRobot, rest: str, counter: list[int], args) -> None:
+    """Отлететь от своей метки на dx dy метров, снять кадр и вернуться на метку."""
+    parts = rest.replace(",", " ").split()
+    if len(parts) != 2:
+        say("нужно два числа: обзор 0.5 0.5 (метры от своей метки)")
+        return
+    dx, dy = float(parts[0]), float(parts[1])
+    if drone.status().get("state") != "hover":
+        say("сначала взлёт")
+        return
+    home = pad_xy(args)
+    point = (home[0] + dx, home[1] + dy)
+    say(f"отлетаю в точку ({point[0]:.2f}, {point[1]:.2f}) м")
+    drone.look(point, args.alt)
+    if not wait_state(drone, "hover", 25):
+        say("ВНИМАНИЕ: борт не подтвердил, что долетел — возвращаю на метку")
+    else:
+        take_shot(drone, counter)
+    say("возвращаюсь на метку")
+    drone.look(home, args.alt)
+    if wait_state(drone, "hover", 25):
+        say("дрон снова над своей меткой")
+
+
+def pad_xy(args) -> tuple[float, float]:
+    """Координаты своей площадки в метрах поля — по тому же config.yaml, что у диспетчера."""
+    from . import config as config_mod
+    from .field import Field
+
+    cell = tuple(int(v) for v in args.cell.split(","))
+    return Field.from_config(config_mod.load()).cell_to_m(cell)
 
 
 def wait_state(drone: HttpRobot, want: tuple[str, ...], seconds: float) -> str:
@@ -231,11 +307,22 @@ def loop(drone: HttpRobot, args) -> None:
     counter = [0]
     confirmed = [False]
     print(HELP)
+    asked_to_quit = False
     while True:
         try:
             line = input("команда> ").strip().lower()
         except EOFError:
             line = "выход"
+        except KeyboardInterrupt:
+            # Ctrl+C на пустом приглашении: выходить с первого раза опасно — выход
+            # сажает дрон, а прервать посадку нечаянным вторым Ctrl+C тем более.
+            print()
+            if asked_to_quit:
+                return
+            asked_to_quit = True
+            say("отмена. Для выхода — команда «выход» или ещё раз Ctrl+C")
+            continue
+        asked_to_quit = False
         if not line:
             continue
         word, _, rest = line.partition(" ")
@@ -250,6 +337,8 @@ def loop(drone: HttpRobot, args) -> None:
                     say(f"выше {args.max_alt:g} м нельзя (регламент: потолок 4 м)")
                     continue
                 do_takeoff(drone, alt, confirmed)
+            elif word in ("обзор", "о", "o"):
+                do_look(drone, rest, counter, args)
             elif word in ("сесть", "посадка", "п", "l"):
                 do_land(drone)
             elif word == "стоп":
@@ -266,10 +355,18 @@ def loop(drone: HttpRobot, args) -> None:
             say(f"борт отказал: {exc}")
         except ValueError:
             say("высота пишется числом, например: взлет 1.2")
+        except KeyboardInterrupt:
+            # Прервано только наше ожидание: борт команду уже получил и продолжает
+            # её выполнять. Поэтому не «отменено», а «перестал ждать».
+            print()
+            say("перестал ждать. Дрон делает то, что ему уже сказано — "
+                "проверьте командой «статус»")
 
 
 def shutdown(drone, host: str, agent_proc, stop: threading.Event, keep: bool) -> None:
+    """Выход. Ctrl+C здесь не роняет пульт: посадка важнее красивого завершения."""
     say("завершаю работу")
+    landing_broken = False
     if drone is not None:
         try:
             if drone.status().get("state") in ("taking_off", "hover"):
@@ -277,15 +374,30 @@ def shutdown(drone, host: str, agent_proc, stop: threading.Event, keep: bool) ->
                 do_land(drone)
         except RobotError as exc:
             # Молчать нельзя: мы выходим, а дрон, возможно, остался в воздухе.
+            landing_broken = True
             say(f"ВНИМАНИЕ: не удалось посадить дрон перед выходом ({exc}) — сажайте пультом")
+        except KeyboardInterrupt:
+            print()
+            landing_broken = True
+            say("посадку прервали на середине")
     stop.set()
     if keep:
         say("программа на борту оставлена работать (--keep)")
         return
-    ssh(host, 'pkill -9 -f "[d]rone_agent" || true')
-    if agent_proc is not None:
-        agent_proc.terminate()
-    say("программа на борту остановлена")
+    if landing_broken:
+        # Убить агент сейчас — снять с борта единственную страховку: без команд
+        # он садится сам по сторожевому таймеру. Пусть доработает.
+        say("программу на борту НЕ трогаю: без команд она посадит дрон сама")
+        say("если дрон всё же висит — сажайте пультом")
+        return
+    try:
+        ssh(host, 'pkill -9 -f "[d]rone_agent" || true')
+        if agent_proc is not None:
+            agent_proc.terminate()
+        say("программа на борту остановлена")
+    except KeyboardInterrupt:
+        print()
+        say("не успел остановить программу на борту — она останется работать")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -300,7 +412,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help=f"порт, по которому дрон виден снаружи (по умолчанию {NET_PORT})")
     p.add_argument("--alt", type=float, default=1.5, help="высота по умолчанию, м")
     p.add_argument("--max-alt", type=float, default=3.5, help="выше не пускать, м")
-    p.add_argument("--watchdog", type=float, default=8.0, help="сесть, если нет команд N с")
+    p.add_argument("--scan-radius", type=float, default=1.0,
+                   help="дальше этого от своей метки борт не улетит по команде «обзор», м")
+    p.add_argument("--watchdog", type=float, default=20.0, help="сесть, если нет команд N с")
     p.add_argument("--color", choices=("bgr", "rgb"), default="bgr", help="порядок цветов камеры")
     p.add_argument("--no-upload", action="store_true", help="не обновлять программу на борту")
     p.add_argument("--no-restart", action="store_true", help="не перезапускать уже работающую")
@@ -364,9 +478,14 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     except KeyboardInterrupt:
         print()
+        say("прервано с клавиатуры")
         return 0
     finally:
-        shutdown(drone, host, agent_proc, stop, args.keep)
+        try:
+            shutdown(drone, host, agent_proc, stop, args.keep)
+        except KeyboardInterrupt:
+            print()
+            say("выход прерван — программа на борту могла остаться работать")
 
 
 if __name__ == "__main__":

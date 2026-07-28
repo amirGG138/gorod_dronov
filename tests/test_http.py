@@ -146,6 +146,21 @@ class TestDrone(HttpCase):
         with self.assertRaises(RobotError):
             self.robot.goto([2, 2], 1.5)
 
+    def test_look_flies_to_a_point_in_metres(self):
+        """Точка обзора задаётся в метрах: точки облёта лежат между клетками."""
+        self.robot.takeoff(1.5)
+        wait_until(self.robot, lambda st: st["state"] == "hover", timeout=10)
+        self.robot.look([-0.7, -0.7], 1.5)
+        st = wait_until(self.robot, lambda st: not st["busy"], timeout=10)
+        self.assertEqual(st["xy"], [-0.7, -0.7])
+        self.robot.look([-1.2, -1.2], 1.5)  # возврат на свою метку
+        st = wait_until(self.robot, lambda st: not st["busy"] and st["xy"] == [-1.2, -1.2], timeout=10)
+        self.assertEqual(st["state"], "hover")
+
+    def test_look_before_takeoff_is_refused(self):
+        with self.assertRaises(RobotError):
+            self.robot.look([-0.7, -0.7], 1.5)
+
 
 class TestNoConnection(unittest.TestCase):
     def test_dead_address_gives_a_clear_error(self):

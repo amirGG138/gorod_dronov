@@ -14,6 +14,9 @@ from city.run import main
 # это и есть «формат логов решений» из требований регламента к README.
 DECISIONS = {
     "PLAN_CHOSEN",
+    "SURVEY",
+    "SCAN",
+    "FIRE_SPOTTED",
     "CHARGED",
     "DWELL",
     "FIRE_CYCLE",
@@ -112,9 +115,52 @@ class TestScenarioOverrides(unittest.TestCase):
     def test_monitors_fly_and_land(self):
         code, events = run_and_read(["--sim", "--drones"])
         self.assertEqual(code, 0)
-        survey = next(e for e in events if e["type"] == "SURVEY")
-        self.assertEqual(survey["source"], "drones")
-        self.assertEqual(survey["shots"], 4)
+        scans = [e for e in events if e["type"] == "SCAN"]
+        self.assertGreaterEqual(len(scans), 4)  # минимум по кадру с каждой площадки
+        final = [e for e in events if e["type"] == "SURVEY"][-1]
+        self.assertEqual(final["source"], "drones")
+
+
+class TestSurveyByPictures(unittest.TestCase):
+    """Разведка кадрами: очаг находится по картинке, а не берётся из настроек."""
+
+    def test_fire_is_found_on_the_pictures(self):
+        code, events = run_and_read(["--sim", "--drones"])
+        self.assertEqual(code, 0)
+        spotted = next(e for e in events if e["type"] == "FIRE_SPOTTED")
+        self.assertEqual(spotted["cell"], [4, 2])
+        self.assertGreaterEqual(spotted["votes"], 1)
+        # Уровень пожара «огонёк» не несёт: источник обязан быть назван честно.
+        self.assertEqual(spotted["level_source"], "config")
+
+    def test_picture_beats_the_config(self):
+        """Очаг нарисован не там, где записан в config.yaml — план идёт по картинке."""
+        code, events = run_and_read(["--sim", "--drones", "--sim-fire-cell", "1,2"])
+        self.assertEqual(code, 0)
+        spotted = next(e for e in events if e["type"] == "FIRE_SPOTTED")
+        self.assertEqual(spotted["cell"], [1, 2])
+        survey = [e for e in events if e["type"] == "SURVEY"][-1]
+        self.assertEqual(survey["fire"], [1, 2])
+        done = next(e for e in events if e["type"] == "FIRE_EXTINGUISHED")
+        self.assertEqual(done["cell"], [1, 2])
+
+    def test_nothing_found_is_said_out_loud(self):
+        """На поле очага нет: система не выдумывает находку, а работает по настройкам."""
+        code, events = run_and_read(["--sim", "--drones", "--sim-fire-cell", "нет"])
+        self.assertEqual(code, 0)
+        self.assertFalse([e for e in events if e["type"] == "FIRE_SPOTTED"])
+        survey = [e for e in events if e["type"] == "SURVEY"][-1]
+        self.assertEqual(survey["source"], "config")
+        self.assertIn("не распознан", survey["reason"])
+        # Облёт при этом состоялся: кадры сняты со всех точек обзора.
+        self.assertGreater(len([e for e in events if e["type"] == "SCAN"]), 4)
+
+    def test_every_scan_names_its_shot(self):
+        """У каждого кадра есть файл: без него решение нечем показать судьям."""
+        code, events = run_and_read(["--sim", "--drones"])
+        self.assertEqual(code, 0)
+        for scan in [e for e in events if e["type"] == "SCAN"]:
+            self.assertTrue(scan["shot"].endswith(".jpg"), scan)
 
 
 class TestEnergyBlock(unittest.TestCase):

@@ -8,9 +8,10 @@
 from __future__ import annotations
 
 import base64
+import math
 from typing import Any, Sequence
 
-from ..field import Cell, as_cell
+from ..field import Cell, Field, as_cell
 from .base import RobotError, Unsupported
 
 # Настоящий (хоть и крохотный) JPEG 16x16: /shot обязан отдавать картинку уже на
@@ -109,14 +110,23 @@ class FakeRover(_Fake):
 class FakeDrone(_Fake):
     role = "drone"
 
-    def __init__(self, clock, cell: Sequence[int] = (1, 1), name: str = "m1") -> None:
+    def __init__(self, clock, cell: Sequence[int] = (1, 1), name: str = "m1", scene=None) -> None:
         super().__init__(clock, cell, name=name)
         self.alt = 0.0
         self.pad: Cell = as_cell(cell)
+        # scene — нарисованный мир (city/robots/scene.py). Есть он — дрон «снимает»
+        # поле с той точки, где висит; нет — отдаёт заглушку. Дрон о содержимом
+        # сцены ничего не знает: очаг на кадре ищет уже диспетчер.
+        self.scene = scene
+        # Без сцены геометрия берётся по умолчанию (6x6 по 0,8 м): статус обязан
+        # называть осмысленные метры, даже когда рисовать кадры нечем.
+        field = scene.field if scene is not None else Field()
+        self.xy = field.cell_to_m(self.pad)
 
     def status(self) -> dict[str, Any]:
         st = super().status()
         st["alt"] = self.alt
+        st["xy"] = [round(v, 3) for v in self.xy]
         return st
 
     def takeoff(self, alt: float) -> dict[str, Any]:
@@ -144,22 +154,47 @@ class FakeDrone(_Fake):
         target = self.check_goto(cell)
         dist = abs(target[0] - self.cell[0]) + abs(target[1] - self.cell[1])
         self._step(target, max(1.0, dist * 0.8))
+        if self.scene is not None:
+            self.xy = self.scene.field.cell_to_m(target)
         self.state = "hover"
         self.alt = float(alt)
         return {"accepted": True, "cell": list(self.cell)}
+
+    def check_look(self, xy: Sequence[float]) -> tuple[float, float]:
+        if self.state != "hover":
+            raise RobotError(f"{self.name}: точка обзора до взлёта")
+        return (float(xy[0]), float(xy[1]))
+
+    def look(self, xy: Sequence[float], alt: float) -> dict[str, Any]:
+        """Зависнуть над точкой поля в метрах: так дрон облетает свой угол."""
+        target = self.check_look(xy)
+        dist = math.hypot(target[0] - self.xy[0], target[1] - self.xy[1])
+        self.state = "moving"
+        self.clock.sleep(max(0.5, dist * 1.5))  # примерно 0,65 м/с
+        self.xy = target
+        self.alt = float(alt)
+        self._last_move = self.clock.now()
+        self.state = "hover"
+        if self.scene is not None:
+            self.cell = self.scene.field.m_to_cell(*target)
+        return {"accepted": True, "xy": [round(v, 3) for v in self.xy]}
 
     def shot(self) -> bytes:
         if self.state not in ("hover", "idle"):
             raise RobotError(f"{self.name}: кадр во время манёвра")
         self.clock.sleep(0.3)
+        if self.scene is not None:
+            frame = self.scene.render(self.xy, max(self.alt, 0.5))
+            if frame is not None:
+                return frame
         return BLANK_JPEG
 
 
 class FakeVup(FakeDrone):
     role = "vup"
 
-    def __init__(self, clock, cell: Sequence[int] = (3, 3), name: str = "vup") -> None:
-        super().__init__(clock, cell, name=name)
+    def __init__(self, clock, cell: Sequence[int] = (3, 3), name: str = "vup", scene=None) -> None:
+        super().__init__(clock, cell, name=name, scene=scene)
 
 
 __all__ = ["FakeRover", "FakeDrone", "FakeVup", "BLANK_JPEG", "RobotError", "Unsupported"]

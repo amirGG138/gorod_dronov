@@ -14,6 +14,7 @@
     curl http://192.168.1.50:2200/status
     curl -X POST http://192.168.1.50:2200/takeoff -d '{"alt":1.5}'
     curl http://192.168.1.50:2200/shot -o kadr.jpg
+    curl -X POST http://192.168.1.50:2200/look -d '{"xy":[-0.7,-0.7],"alt":1.5}'
     curl -X POST http://192.168.1.50:2200/land
 
 Что важно знать про этот файл (всё добыто на живом железе, не выдумано):
@@ -34,8 +35,11 @@
   timeout и без него бросает TypeError. Обе сигнатуры обёрнуты, посадка повторяется.
   Принятая команда — это ещё не посадка, поэтому состояний два: landed (подтверждено
   дизармом по телеметрии) и landed_unverified (команда принята, доказательств нет).
-* Монитор по полю НЕ ЛЕТАЕТ: взлетел со своей площадки, завис, снял кадр вниз, сел.
-  Команда /goto есть, но без --allow-goto отвечает отказом.
+* Монитор летает только вокруг СВОЕЙ площадки: /look уводит его на точку обзора в
+  метрах и возвращает на метку. Дальше --scan-radius от своей метки он не уйдёт, а
+  без --allow-scan откажет и на это. Перелёт в чужую клетку (/goto) по-прежнему
+  закрыт ключом --allow-goto. Причина ограничения: на рабочей высоте камера видит
+  меньше, чем угол поля, поэтому отлетать нужно, а вот улетать — нет.
 
 Требуется только стандартная библиотека + sverk_interfaces + cv2/numpy, которые на
 борту уже стоят. Режим --dry позволяет запустить файл где угодно без железа.
@@ -156,6 +160,8 @@ class Agent:
         self.args = args
         self.name = args.name
         self.cell = [int(v) for v in args.cell.split(",")]
+        self.pad = list(self.cell)  # своя площадка: от неё считается предел удаления
+        self.xy = self.cell_to_m(self.cell)
         self.alt = 0.0
         # idle | taking_off | hover | landing | landed | landed_unverified
         # | land_failed | error
@@ -207,6 +213,7 @@ class Agent:
             "name": self.name,
             "state": self.state,
             "cell": self.cell,
+            "xy": [round(v, 2) for v in self.xy],
             "alt": round(self.alt, 2),
             "since_move": round(time.monotonic() - self._last_move, 2),
             "busy": self._busy,
@@ -449,21 +456,71 @@ class Agent:
         x, y = self.cell_to_m(cell)
         alt = min(float(alt), self.args.max_alt)
         say(f"перелёт в клетку {list(cell)} = ({x:.2f}, {y:.2f}) м на {alt:g} м")
+        if self._fly(x, y, alt, "перелёт", job):
+            self.cell = [int(cell[0]), int(cell[1])]
+
+    def look(self, xy, alt: float) -> dict:
+        """Точка обзора: отлететь от своей метки на заданные метры и зависнуть.
+
+        Так монитор осматривает свой угол поля: на рабочей высоте кадр уже, чем
+        четверть поля. Возврат на метку — это тот же /look с её координатами.
+        """
+        if not self.args.allow_scan:
+            raise Refused(
+                "облёт запрещён: запустите агент с ключом --allow-scan, если это осознанно"
+            )
+        if self.state != "hover":
+            raise Refused("точка обзора до взлёта")
+        x, y = float(xy[0]), float(xy[1])
+        px, py = self.cell_to_m(self.pad)
+        away = ((x - px) ** 2 + (y - py) ** 2) ** 0.5
+        if away > self.args.scan_radius:
+            # Предел не формальность: улетевший в чужой угол монитор — это чужая
+            # площадка, чужой дрон в воздухе и потеря своей метки под камерой.
+            raise Refused(
+                f"точка ({x:.2f}, {y:.2f}) в {away:.2f} м от своей метки, "
+                f"предел {self.args.scan_radius:g} м"
+            )
+        return self.start("look", lambda job: self._look(x, y, alt, job))
+
+    def _look(self, x: float, y: float, alt: float, job: Job) -> None:
+        alt = min(float(alt), self.args.max_alt)
+        say(f"точка обзора ({x:.2f}, {y:.2f}) м на {alt:g} м")
+        self._fly(x, y, alt, "точка обзора", job)
+
+    def _fly(self, x: float, y: float, alt: float, what: str, job: Job) -> bool:
+        """Один navigate до точки поля и пауза на долёт.
+
+        navigate издаётся РОВНО ОДИН РАЗ: повторный вызов переинициализирует
+        траекторию, и дрон бесконечно начинает заход заново.
+
+        Кадр карты меток (`aruco_map`) требует живой локализации по меткам: если
+        её нет, navigate отвечает «SpeedController initialization failed (TF
+        error?)». Поэтому с `--frame body` та же точка поля пересчитывается в
+        смещение от текущего места — в body координаты относительные, а z это
+        приращение высоты, а не сама высота (docs/zmeyka.md).
+        """
         if self.dry:
             wait = 2.0
         else:
+            tx, ty, tz = x, y, alt
+            if self.args.frame == "body":
+                tx, ty, tz = x - self.xy[0], y - self.xy[1], alt - self.alt
+                say(f"{what}: смещаюсь на ({tx:+.2f}, {ty:+.2f}, {tz:+.2f}) м от себя")
             resp = self.drone.control.navigate(
-                x=x, y=y, z=alt, yaw=0.0, speed=self.args.speed,
+                x=tx, y=ty, z=tz, yaw=0.0, speed=self.args.speed,
                 frame_id=self.args.frame, auto_arm=True,
             )
             if resp is not None and not getattr(resp, "success", True):
-                raise RuntimeError(f"перелёт не принят: {getattr(resp, 'message', '')}")
+                raise RuntimeError(f"{what} не принят: {getattr(resp, 'message', '')}")
             wait = self.args.hop_wait
         if not self._wait(job, wait):
-            say("перелёт прерван более важной командой — клетку не переписываю")
-            return
-        self.cell = [int(cell[0]), int(cell[1])]
-        self._set(job, state="hover", alt=alt, moved=True)
+            say(f"{what} прерван более важной командой — положение не переписываю")
+            return False
+        if not self._set(job, state="hover", alt=alt, moved=True):
+            return False
+        self.xy = (x, y)
+        return True
 
     def shot(self) -> bytes:
         if self.dry:
@@ -589,6 +646,9 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/goto":
                 cell, alt = body["cell"], body.get("alt", self.agent.args.alt)
                 return self._json(200, self.agent.once(cid, lambda: self.agent.goto(cell, alt)))
+            if self.path == "/look":
+                xy, alt = body["xy"], body.get("alt", self.agent.args.alt)
+                return self._json(200, self.agent.once(cid, lambda: self.agent.look(xy, alt)))
             if self.path == "/stop":
                 return self._json(200, self.agent.once(cid, self.agent.stop))
         except Busy as exc:
@@ -614,11 +674,20 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--settle", type=float, default=2.5, help="пауза на успокоение после взлёта, с")
     p.add_argument("--land-wait", type=float, default=4.0, help="пауза на снижение, с")
     p.add_argument("--hop-wait", type=float, default=6.0, help="пауза на перелёт, с")
-    p.add_argument("--watchdog", type=float, default=8.0, help="сесть, если нет команд N с (0 — выкл)")
-    p.add_argument("--frame", default="aruco_map", help="кадр координат для перелётов")
+    p.add_argument("--watchdog", type=float, default=20.0, help="сесть, если нет команд N с (0 — выкл)")
+    p.add_argument(
+        "--frame", default="aruco_map",
+        help="кадр координат для перелётов: aruco_map (нужна локализация по меткам) "
+             "или body (смещение от текущего места, без карты)",
+    )
     p.add_argument("--grid", default="6,6", help="размер поля в клетках")
     p.add_argument("--cell-size", type=float, default=0.8, help="сторона клетки, м")
     p.add_argument("--allow-goto", action="store_true", help="разрешить перелёты по полю")
+    p.add_argument("--allow-scan", action="store_true", help="разрешить облёт вокруг своей метки")
+    p.add_argument(
+        "--scan-radius", type=float, default=1.0,
+        help="дальше этого от своей метки при облёте не улетать, м",
+    )
     p.add_argument("--telemetry", action="store_true", help="добавлять телеметрию в статус (может виснуть)")
     p.add_argument(
         "--color", choices=("bgr", "rgb"), default="bgr",

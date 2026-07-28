@@ -24,6 +24,13 @@ def _cell(text: str) -> list[int]:
     return [int(parts[0]), int(parts[1])]
 
 
+def _sim_cell(text: str) -> list[int] | str:
+    """Клетка для нарисованного мира или слово «нет» — поле вовсе без очага."""
+    if text.strip().lower() in ("нет", "none", "-"):
+        return "none"
+    return _cell(text)
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="city.run", description="Диспетчер «Города дронов»")
     p.add_argument("--config", default=config_mod.CONFIG_PATH, help="путь к config.yaml")
@@ -45,6 +52,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--drone-url", help="адрес первого дрона-монитора (m1)")
     p.add_argument("--fire-cell", type=_cell, help="клетка пожара, например 4,2")
     p.add_argument("--fire-level", type=int, help="уровень пожара = число поездок за водой")
+    p.add_argument(
+        "--sim-fire-cell",
+        type=_sim_cell,
+        help="куда поставить очаг в НАРИСОВАННОМ мире (только с --sim --drones): "
+        "проверка, что диспетчер верит кадрам, а не config.yaml. "
+        "«нет» — поле без очага, проверка честного отказа разведки",
+    )
     p.add_argument("--logs", default="logs", help="каталог для лога попытки")
     p.add_argument("--quiet", action="store_true", help="не печатать таймлайн в консоль")
     return p
@@ -72,6 +86,8 @@ def apply_args(cfg, args) -> None:
         cfg.override("scenario.fire.cell", args.fire_cell)
     if args.fire_level is not None:
         cfg.override("scenario.fire.level", args.fire_level)
+    if args.sim_fire_cell:
+        cfg.override("sim.fire_cell", args.sim_fire_cell)
 
 
 def main(argv: list[str] | None = None) -> int:

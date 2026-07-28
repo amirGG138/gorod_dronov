@@ -82,6 +82,12 @@ class HttpRobot:
     def goto(self, cell: Sequence[int], alt: float) -> dict[str, Any]:
         return self._request("POST", "/goto", {"cell": [int(cell[0]), int(cell[1])], "alt": float(alt)})
 
+    def look(self, xy: Sequence[float], alt: float) -> dict[str, Any]:
+        """Зависнуть над точкой поля, заданной в метрах (точка обзора при облёте)."""
+        return self._request(
+            "POST", "/look", {"xy": [float(xy[0]), float(xy[1])], "alt": float(alt)}
+        )
+
     def shot(self) -> bytes:
         return self._request("GET", "/shot", raw=True)
 

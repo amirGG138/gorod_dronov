@@ -17,6 +17,8 @@ from typing import Any
 EVENT_TYPES = (
     "RUN_START",
     "ROBOT",
+    "SCAN",
+    "FIRE_SPOTTED",
     "SURVEY",
     "PLAN_CHOSEN",
     "PLAN",
@@ -82,6 +84,17 @@ class Log:
             return (
                 f"{_fmt_cell(r.get('cell'))} {r.get('seconds')}с лента={r.get('led')} "
                 f"{counted}"
+            )
+        if type_ == "SCAN":
+            seen = "очаг " + _fmt_cell(r.get("fire_cell")) if r.get("fire_cell") else "пусто"
+            return (
+                f"{r.get('drone')} точка ({r.get('xy', ['?', '?'])[0]}, {r.get('xy', ['?', '?'])[1]}) "
+                f"привязка={r.get('anchor')} {seen}"
+            )
+        if type_ == "FIRE_SPOTTED":
+            return (
+                f"{_fmt_cell(r.get('cell'))} голосов {r.get('votes')}/{r.get('total')} "
+                f"уровень={r.get('level')} ({r.get('level_source')})"
             )
         if type_ == "ROBOT":
             return f"{r.get('name')} ({r.get('role')}) {r.get('url')} {_fmt_cell(r.get('cell'))}"

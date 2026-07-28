@@ -122,13 +122,28 @@ def build_fleet(cfg, clock, transport: str | None = None) -> Fleet:
 
 def _build_fake(cfg, clock) -> Fleet:
     move_time = float(cfg.get("sim.move_time", 1.2))
+    scene = _scene(cfg)
     rover = FakeRover(clock, cfg.cells.rover_start, move_time=move_time)
-    vup = FakeVup(clock, cfg.cells.charge) if cfg.get("flags.use_vup", False) else None
+    vup = FakeVup(clock, cfg.cells.charge, scene=scene) if cfg.get("flags.use_vup", False) else None
     monitors = {}
     if cfg.get("flags.use_drones", False):
         for name in _monitors_enabled(cfg):
-            monitors[name] = FakeDrone(clock, cfg.robots.monitors[name].pad, name=name)
+            monitors[name] = FakeDrone(clock, cfg.robots.monitors[name].pad, name=name, scene=scene)
     return Fleet(rover=rover, vup=vup, monitors=monitors, transport="fake")
+
+
+def _scene(cfg):
+    """Нарисованный мир для кадров понарошечных дронов, или None без OpenCV.
+
+    Диспетчер к нему не обращается: сцена — это то, что стоит на поле, а не то, что
+    он знает. Он видит только кадры.
+    """
+    try:
+        from .scene import SceneSpec
+
+        return SceneSpec.from_config(cfg)
+    except Exception:  # noqa: BLE001 — без картинок система обязана работать
+        return None
 
 
 def _build_http(cfg) -> Fleet:

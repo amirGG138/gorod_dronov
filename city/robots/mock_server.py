@@ -147,6 +147,10 @@ class _Handler(BaseHTTPRequestHandler):
             goto = self._method("goto")
             cell, alt = self._method("check_goto")(body["cell"]), float(body.get("alt", 1.5))
             return self._accept("goto", lambda: goto(cell, alt))
+        if self.path == "/look":
+            look = self._method("look")
+            xy, alt = self._method("check_look")(body["xy"]), float(body.get("alt", 1.5))
+            return self._accept("look", lambda: look(xy, alt))
         if self.path == "/drive":
             drive = self._method("drive")
             cell = self._method("check_drive")(body["cell"])
@@ -179,17 +183,28 @@ class _Handler(BaseHTTPRequestHandler):
         self._json(404, {"error": f"нет такого пути: {self.path}"})
 
 
-def serve(role: str, port: int, cell=(3, 3), name: str = "", move_time: float = 1.2, quiet: bool = False):
+def serve(
+    role: str,
+    port: int,
+    cell=(3, 3),
+    name: str = "",
+    move_time: float = 1.2,
+    quiet: bool = False,
+    scene=None,
+):
     """Поднять мок в отдельном потоке. Возвращает (сервер, робот).
 
     port=0 — занять любой свободный порт; какой достался, видно в
     `server.server_address[1]` (так делают тесты, чтобы не драться за номера).
+
+    scene — нарисованный мир для кадров (city/robots/scene.py). Без него мок отдаёт
+    заглушку, и проверить по сети можно только связь, но не зрение.
     """
     clock = RealClock()
     if role == "rover":
         robot = FakeRover(clock, cell, move_time=move_time)
     else:
-        robot = ROLES[role](clock, cell, name=name or role)
+        robot = ROLES[role](clock, cell, name=name or role, scene=scene)
 
     handler = type(
         "_Bound",
@@ -216,10 +231,19 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--name", default="")
     p.add_argument("--move-time", type=float, default=1.2, help="секунд на переезд в соседнюю клетку")
     p.add_argument("--quiet", action="store_true")
+    p.add_argument("--blank", action="store_true", help="отдавать пустой кадр вместо нарисованного поля")
     args = p.parse_args(argv)
 
     cell = tuple(int(v) for v in args.cell.split(","))
-    server, robot = serve(args.role, args.port, cell, args.name, args.move_time, args.quiet)
+    scene = None
+    if args.role != "rover" and not args.blank:
+        # Кадры рисуются по тому же config.yaml, что читает диспетчер: иначе проверка
+        # по сети показывала бы связь, но не зрение.
+        from .. import config as config_mod
+        from .scene import SceneSpec
+
+        scene = SceneSpec.from_config(config_mod.load())
+    server, robot = serve(args.role, args.port, cell, args.name, args.move_time, args.quiet, scene)
     print(
         f"мок «{robot.name}» ({args.role}) слушает порт {args.port}, стоит в клетке {list(robot.cell)}\n"
         f"проверка: curl http://127.0.0.1:{args.port}/status\n"

@@ -5,8 +5,13 @@
     GET  /status  -> status()
     POST /takeoff -> takeoff(alt)      POST /land  -> land()
     POST /goto    -> goto(cell, alt)   GET  /shot  -> shot()
-    POST /drive   -> drive(cell)       POST /led   -> led(mode, color)
-    POST /stop    -> stop()
+    POST /look    -> look(xy, alt)     POST /drive -> drive(cell)
+    POST /led     -> led(mode, color)  POST /stop  -> stop()
+
+/look отличается от /goto только единицами: точка задаётся в метрах поля, а не в
+клетках. Она нужна для облёта: точки обзора монитора лежат МЕЖДУ клетками, и
+округлять их до клетки — значит снимать не то место. Возврат на свою площадку —
+тот же /look с координатами её метки.
 
 Аппарат реализует только свои методы; остальные бросают Unsupported. Диспетчер
 никогда не проверяет тип объекта — он проверяет роль в status()["role"].
@@ -43,6 +48,8 @@ class Drone(Robot, Protocol):
     def land(self) -> dict[str, Any]: ...
 
     def goto(self, cell: Sequence[int], alt: float) -> dict[str, Any]: ...
+
+    def look(self, xy: Sequence[float], alt: float) -> dict[str, Any]: ...
 
     def shot(self) -> bytes: ...
 

@@ -144,14 +144,22 @@ class TestMonitorsAreNeverLeftFlying(unittest.TestCase):
         for name, drone in fleet.monitors.items():
             self.assertEqual(drone.state, "landed", f"{name} остался в воздухе")
 
-    def test_survey_does_not_pretend_the_scene_came_from_frames(self):
+    def test_survey_does_not_pretend_the_level_came_from_frames(self):
+        """Клетку кадр даёт, а уровень пожара — нет: «огонёк» на поле числа не несёт.
+
+        Раньше здесь проверялось, что вся сцена берётся из config.yaml: разбора
+        кадров ещё не было. Теперь клетка приходит с картинки, и охранять надо уже
+        не это, а честность второго источника — иначе выдуманное число рейсов за
+        водой ничем не будет отличаться в логе от измеренного.
+        """
         cfg = config_mod.load()
         cfg.override("flags.use_drones", True)
         _, events, _, _ = run_dispatcher(Dispatcher, cfg=cfg)
-        survey = next(e for e in events if e["type"] == "SURVEY")
-        self.assertEqual(survey["shots"], 4)
-        self.assertEqual(survey["scenario_source"], "config")
-        self.assertIn("config.yaml", survey["reason"])
+        survey = [e for e in events if e["type"] == "SURVEY"][-1]
+        self.assertGreaterEqual(survey["shots"], 4)
+        self.assertEqual(survey["landing_unverified"], [])
+        spotted = next(e for e in events if e["type"] == "FIRE_SPOTTED")
+        self.assertEqual(spotted["level_source"], "config")
 
 
 def _no_frame():
