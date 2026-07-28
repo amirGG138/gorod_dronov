@@ -1,7 +1,7 @@
 """Точка входа: python -m city.run --sim
 
 Флаги закрывают то, что придётся менять на площадке в спешке, без правки
-config.yaml: уровень и клетку пожара, клетки доставки, наличие аппаратов.
+config.yaml: уровень и клетку пожара, наличие аппаратов.
 """
 
 from __future__ import annotations
@@ -45,8 +45,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--drone-url", help="адрес первого дрона-монитора (m1)")
     p.add_argument("--fire-cell", type=_cell, help="клетка пожара, например 4,2")
     p.add_argument("--fire-level", type=int, help="уровень пожара = число поездок за водой")
-    p.add_argument("--pickup", type=_cell, help="клетка старта доставки")
-    p.add_argument("--dropoff", type=_cell, help="клетка финиша доставки")
     p.add_argument("--logs", default="logs", help="каталог для лога попытки")
     p.add_argument("--quiet", action="store_true", help="не печатать таймлайн в консоль")
     return p
@@ -74,10 +72,6 @@ def apply_args(cfg, args) -> None:
         cfg.override("scenario.fire.cell", args.fire_cell)
     if args.fire_level is not None:
         cfg.override("scenario.fire.level", args.fire_level)
-    if args.pickup:
-        cfg.override("scenario.delivery.pickup", args.pickup)
-    if args.dropoff:
-        cfg.override("scenario.delivery.dropoff", args.dropoff)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -1,8 +1,10 @@
-"""Агент-диспетчер: разведка -> порядок миссий -> план -> исполнение с доказательствами.
+"""Агент-диспетчер: разведка -> план -> исполнение с доказательствами.
 
 Цикл линейный и читается сверху вниз. Никаких фазовых машин и очередей: на
-15-минутную попытку из двух миссий их незачем заводить, а отлаживать в поле
-проще то, что видно целиком.
+15-минутную попытку их незачем заводить, а отлаживать в поле проще то, что
+видно целиком.
+
+Миссия попытки одна — «Пожар»: «Доставку» команда не выполняет (PLAN.md).
 """
 
 from __future__ import annotations
@@ -21,9 +23,7 @@ from .rules import (
     Scenario,
     compile_plan,
     dwell_valid,
-    escort_lag_ok,
-    load_dwell_valid,
-    mission_order,
+    plan_reasons,
     plan_total_energy,
     water_dwell_valid,
 )
@@ -71,17 +71,15 @@ class Dispatcher:
         try:
             self.connect()
             self.survey()
-            order, reasons = mission_order(
-                self.field, self.sc, self._dangers(), self.rules
-            )
+            reasons = plan_reasons(self.field, self.sc, self.rules)
             self.log.ev(
-                "MISSION_ORDER",
-                order=order,
+                "PLAN_CHOSEN",
+                mission="fire",
                 reasons=reasons,
                 reason="; ".join(reasons),
             )
 
-            actions, moves, end = compile_plan(self.field, self.sc, order, self.rules)
+            actions, moves, end = compile_plan(self.field, self.sc, self.rules)
             budget, budget_reason = plan_total_energy(
                 self.field, self.sc, moves, end, self.rules
             )
@@ -94,7 +92,7 @@ class Dispatcher:
             )
 
             self.precharge(budget, budget_reason)
-            self.execute(actions, order)
+            self.execute(actions)
         except (RouteBlocked, EnergyError, MissionFailed) as exc:
             self.log.ev("ERROR", error=type(exc).__name__, reason=str(exc))
             self.fleet.stop_all()
@@ -105,7 +103,7 @@ class Dispatcher:
             self.fleet.stop_all()
             return 1
 
-        ok = len(self.done_missions) == 2
+        ok = "fire" in self.done_missions
         self.log.ev(
             "DONE",
             missions=self.done_missions,
@@ -131,7 +129,7 @@ class Dispatcher:
                 reason = f"борт на связи, состояние «{entry.get('state')}»"
             self.log.ev("ROBOT", **entry, reason=reason)
 
-        # Без ровера обе миссии невыполнимы: тратить время на планирование и
+        # Без ровера миссия невыполнима: тратить время на планирование и
         # зарядку, чтобы упасть на первом же переезде, — худший способ узнать это.
         rover = next((e for e in report if e["role"] == "rover"), None)
         if rover and rover.get("error"):
@@ -147,8 +145,6 @@ class Dispatcher:
                 source="config",
                 fire=list(self.sc.fire_cell),
                 fire_level=self.sc.fire_level,
-                pickup=list(self.sc.pickup),
-                dropoff=list(self.sc.dropoff),
                 reason="дроны-мониторы выключены, сцена взята из config.yaml",
             )
 
@@ -243,7 +239,13 @@ class Dispatcher:
             reason=reason,
         )
 
-    def execute(self, actions: Sequence[Any], order: Sequence[str]) -> None:
+    def execute(self, actions: Sequence[Any]) -> None:
+        # Миссия сейчас одна, но список строится по самому плану: если завтра
+        # добавится вторая, здесь ничего менять не придётся.
+        order: list[str] = []
+        for action in actions:
+            if action.mission and action.mission not in order:
+                order.append(action.mission)
         for mission in order:
             mission_actions = [a for a in actions if a.mission == mission]
             try:
@@ -265,8 +267,6 @@ class Dispatcher:
                     energy=self.energy.energy,
                     reason=str(exc),
                 )
-            finally:
-                self._end_mission(mission)
 
     # --- исполнение действий ------------------------------------------------
 
@@ -304,15 +304,15 @@ class Dispatcher:
             if i == 0:  # причина у первого переезда участка, дальше она бы повторялась
                 fields["reason"] = action.reason
             self.log.ev("MOVE", **fields)
-            self._escort_step(prev, action)
 
     def _do_dwell(self, action) -> None:
         rover = self.fleet.rover
         if action.led:
             rover.led(action.led)
         measured, moved, in_zone, led_on = self._hold(rover, action.cell, action.seconds)
-        check = water_dwell_valid if action.dwell_kind == "water" else load_dwell_valid
-        counted = check(measured, moved=moved, in_zone=in_zone, led_on=led_on, rules=self.rules)
+        counted = water_dwell_valid(
+            measured, moved=moved, in_zone=in_zone, led_on=led_on, rules=self.rules
+        )
         self.log.ev(
             "DWELL",
             action=action.id,
@@ -369,35 +369,6 @@ class Dispatcher:
     def _start_mission(self, mission: str) -> None:
         if mission == "fire":
             self._vup_person_search()
-        elif mission == "delivery":
-            if not self.fleet.vup:
-                self.log.ev(
-                    "VUP_ABSENT",
-                    mission="delivery",
-                    missing=["delivery_escort"],
-                    reason=(
-                        "воздушного эскорта не будет: микродрона нет, компенсировать "
-                        "его нечем — пункт задания остаётся незакрытым"
-                    ),
-                )
-                return
-            self.fleet.vup.takeoff(VUP_ALT)
-            self._wait_state(self.fleet.vup, ("hover",), timeout=20.0)
-            self.log.ev(
-                "ESCORT",
-                state="launched",
-                alt=VUP_ALT,
-                reason="ВУП поднят на эскорт доставки, идёт строго сзади ровера",
-            )
-
-    def _end_mission(self, mission: str) -> None:
-        if mission == "delivery" and self.fleet.vup:
-            try:
-                self.fleet.vup.land()
-                self._wait_state(self.fleet.vup, ("landed", "idle"), timeout=25.0)
-                self.log.ev("ESCORT", state="landed", reason="доставка завершена, ВУП сел")
-            except RobotError as exc:
-                self.log.ev("ERROR", error="RobotError", reason=f"ВУП не сел: {exc}")
 
     def _vup_person_search(self) -> None:
         """Поиск человека в окне горящего здания. Без аппарата — честный отказ."""
@@ -408,7 +379,7 @@ class Dispatcher:
                 missing=["person_detection_in_window"],
                 reason=(
                     "человека в окне искать нечем: ВУП отсутствует, а разбор кадра "
-                    "монитора появится на этапах 3 и 8"
+                    "монитора появится на этапах 3 и 7"
                 ),
             )
             return
@@ -426,39 +397,7 @@ class Dispatcher:
             source="vup",
             cell=list(self.sc.fire_cell),
             reason=(
-                "кадр окна снят, но детектора ещё нет (этапы 3 и 8): "
+                "кадр окна снят, но детектора ещё нет (этапы 3 и 7): "
                 "результат не выдумываем"
             ),
         )
-
-    def _escort_step(self, prev_cell: Cell, action) -> None:
-        """Эскорт встаёт на предыдущую клетку ровера, отставание считаем манхэттенски."""
-        vup = self.fleet.vup
-        if not vup or action.mission != "delivery":
-            return
-        vup.goto(prev_cell, VUP_ALT)
-        # Ждём, пока эскорт долетит: иначе отставание считалось бы по клетке,
-        # в которую дрон только собирается прибыть.
-        self._wait_state(vup, ("hover",), timeout=30.0)
-        rover_cell = as_cell(self.fleet.rover.status()["cell"])
-        vup_cell = as_cell(vup.status()["cell"])
-        ok = escort_lag_ok(rover_cell, vup_cell, self.rules)
-        lag = abs(rover_cell[0] - vup_cell[0]) + abs(rover_cell[1] - vup_cell[1])
-        self.log.ev(
-            "ESCORT",
-            state="follow" if ok else "violation",
-            rover=list(rover_cell),
-            vup=list(vup_cell),
-            lag=lag,
-            reason=(
-                f"отставание эскорта {lag} при пределе {self.rules.escort_max_lag}"
-                if ok
-                else f"отставание эскорта {lag} превысило предел {self.rules.escort_max_lag}"
-            ),
-        )
-
-    def _dangers(self) -> dict[str, int]:
-        return {
-            "fire": int(self.cfg.get("missions.fire.danger", 3)),
-            "delivery": int(self.cfg.get("missions.delivery.danger", 1)),
-        }

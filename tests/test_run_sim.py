@@ -13,12 +13,11 @@ from city.run import main
 # События, за которыми стоит решение: у них обязан быть reason по-русски —
 # это и есть «формат логов решений» из требований регламента к README.
 DECISIONS = {
-    "MISSION_ORDER",
+    "PLAN_CHOSEN",
     "CHARGED",
     "DWELL",
     "FIRE_CYCLE",
     "FIRE_EXTINGUISHED",
-    "DELIVERY_DONE",
     "VUP_ABSENT",
     "ENERGY_BLOCK",
     "ERROR",
@@ -47,11 +46,10 @@ class TestFullRun(unittest.TestCase):
 
     def test_timeline_order(self):
         for earlier, later in (
-            ("SURVEY", "MISSION_ORDER"),
-            ("MISSION_ORDER", "CHARGED"),
+            ("SURVEY", "PLAN_CHOSEN"),
+            ("PLAN_CHOSEN", "CHARGED"),
             ("CHARGED", "FIRE_EXTINGUISHED"),
-            ("FIRE_EXTINGUISHED", "DELIVERY_DONE"),
-            ("DELIVERY_DONE", "DONE"),
+            ("FIRE_EXTINGUISHED", "DONE"),
         ):
             self.assertLess(self.types.index(earlier), self.types.index(later), f"{earlier} < {later}")
 
@@ -66,7 +64,7 @@ class TestFullRun(unittest.TestCase):
 
     def test_all_dwells_counted(self):
         dwells = [e for e in self.events if e["type"] == "DWELL"]
-        self.assertEqual(len(dwells), 3)  # два забора воды + погрузка
+        self.assertEqual(len(dwells), 2)  # два забора воды по уровню пожара
         for d in dwells:
             self.assertTrue(d["counted"], d)
             self.assertFalse(d["moved"], d)
@@ -88,9 +86,9 @@ class TestFullRun(unittest.TestCase):
 
     def test_vup_absence_is_stated_not_faked(self):
         absent = [e for e in self.events if e["type"] == "VUP_ABSENT"]
-        self.assertEqual({e["mission"] for e in absent}, {"fire", "delivery"})
+        self.assertEqual({e["mission"] for e in absent}, {"fire"})
+        self.assertEqual(absent[0]["missing"], ["person_detection_in_window"])
         self.assertFalse([e for e in self.events if e["type"] == "PERSON_FOUND"])
-        self.assertFalse([e for e in self.events if e["type"] == "ESCORT"])
 
     def test_no_errors(self):
         self.assertFalse([e for e in self.events if e["type"] == "ERROR"])
@@ -102,12 +100,13 @@ class TestScenarioOverrides(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(len([e for e in events if e["type"] == "FIRE_CYCLE"]), 3)
 
-    def test_vup_flag_turns_on_escort(self):
+    def test_vup_flag_turns_on_the_person_search(self):
         code, events = run_and_read(["--sim", "--vup"])
         self.assertEqual(code, 0)
-        escorts = [e for e in events if e["type"] == "ESCORT"]
-        self.assertTrue(escorts)
-        self.assertFalse([e for e in escorts if e["state"] == "violation"])
+        found = [e for e in events if e["type"] == "PERSON_FOUND"]
+        self.assertTrue(found)
+        self.assertEqual(found[0]["source"], "vup")
+        self.assertIsNone(found[0]["found"])  # детектора ещё нет — результат не выдумываем
         self.assertFalse([e for e in events if e["type"] == "VUP_ABSENT"])
 
     def test_monitors_fly_and_land(self):

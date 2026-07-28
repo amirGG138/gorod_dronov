@@ -3,9 +3,9 @@
     python3 -m city.pult
 
 Сам делает всё, что раньше приходилось разводить по трём терминалам:
-кладёт свежую бортовую программу на дрон, запускает её, поднимает туннель
-(порт контейнера наружу не проброшен), показывает сообщения борта и ждёт
-команд с клавиатуры. На выходе сажает дрон и убирает за собой.
+кладёт свежую бортовую программу на дрон, запускает её, показывает
+сообщения борта и ждёт команд с клавиатуры. На выходе сажает дрон и
+убирает за собой.
 
 Это наземный инструмент оператора, а не часть зачётного решения: в попытке
 командует диспетчер (`python3 -m city.run`), а пульт нужен, чтобы проверять
@@ -28,6 +28,12 @@ DRONE_IP = "192.168.1.105"  # борт, на котором всё провер�
 USER = "sverk"
 REMOTE_DIR = "~/gorod_dronov/onboard"
 SHOTS = "logs/shots"
+
+# Бортовая программа живёт внутри контейнера и слушает AGENT_PORT. Снаружи контейнер
+# виден по NET_PORT: на дроне настроен постоянный проброс 2200 → 8020. Раньше на его
+# месте был ssh-туннель — он больше не нужен.
+AGENT_PORT = 8020
+NET_PORT = 2200
 
 HELP = """
 Команды (можно первой буквой):
@@ -141,31 +147,6 @@ def tail_log(host: str, log: str, stop: threading.Event) -> None:
         proc.terminate()
 
 
-def open_tunnel(host: str, local: int, remote: int) -> subprocess.Popen | None:
-    """Порты контейнера наружу не проброшены — дорогу к борту открываем туннелем.
-
-    Забытый туннель от прошлого запуска — обычное дело: он не закрывается сам и
-    держит порт. Такие свои же туннели убираем молча, чужое приложение на этом
-    порту не трогаем.
-    """
-    for attempt in (1, 2):
-        proc = subprocess.Popen(
-            ["ssh", "-N", "-o", "BatchMode=yes", "-o", "ExitOnForwardFailure=yes",
-             "-L", f"{local}:127.0.0.1:{remote}", host],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
-        )
-        time.sleep(1.0)
-        if proc.poll() is None:
-            return proc
-        err = proc.stderr.read() if proc.stderr else ""
-        if "Address already in use" not in err or attempt == 2:
-            raise RobotError(f"туннель не поднялся: {err.strip()}")
-        say(f"порт {local} занят старым туннелем — закрываю его")
-        subprocess.run(["pkill", "-f", f"ssh -N .*-L {local}:127.0.0.1"], capture_output=True)
-        time.sleep(1.0)
-    return None
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 #  КОМАНДЫ С КЛАВИАТУРЫ
 # ═══════════════════════════════════════════════════════════════════════════
@@ -277,7 +258,7 @@ def loop(drone: HttpRobot, args) -> None:
             say("высота пишется числом, например: взлет 1.2")
 
 
-def shutdown(drone, host: str, tunnel, agent_proc, stop: threading.Event, keep: bool) -> None:
+def shutdown(drone, host: str, agent_proc, stop: threading.Event, keep: bool) -> None:
     say("завершаю работу")
     if drone is not None:
         try:
@@ -287,8 +268,6 @@ def shutdown(drone, host: str, tunnel, agent_proc, stop: threading.Event, keep: 
         except RobotError:
             pass
     stop.set()
-    if tunnel is not None:
-        tunnel.terminate()
     if keep:
         say("программа на борту оставлена работать (--keep)")
         return
@@ -304,8 +283,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--user", default=USER)
     p.add_argument("--name", default="m1", help="имя борта")
     p.add_argument("--cell", default="1,1", help="на какой площадке стоит, col,row")
-    p.add_argument("--port", type=int, default=8020, help="порт на дроне")
-    p.add_argument("--local-port", type=int, default=0, help="порт на ноутбуке (по умолчанию тот же)")
+    p.add_argument("--port", type=int, default=AGENT_PORT,
+                   help=f"порт внутри контейнера, его занимает бортовая программа (по умолчанию {AGENT_PORT})")
+    p.add_argument("--net-port", type=int, default=NET_PORT,
+                   help=f"порт, по которому дрон виден снаружи (по умолчанию {NET_PORT})")
     p.add_argument("--alt", type=float, default=1.5, help="высота по умолчанию, м")
     p.add_argument("--max-alt", type=float, default=3.5, help="выше не пускать, м")
     p.add_argument("--watchdog", type=float, default=8.0, help="сесть, если нет команд N с")
@@ -320,9 +301,8 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     host = f"{args.user}@{args.ip}"
-    local = args.local_port or args.port
+    url = f"http://{args.ip}:{args.net_port}"
     stop = threading.Event()
-    tunnel = None
     agent_proc = None
     drone: HttpRobot | None = None
 
@@ -344,11 +324,21 @@ def main(argv: list[str] | None = None) -> int:
             log, agent_proc = start_agent(host, args)
             wait_ready(host, log)
 
-        tunnel = open_tunnel(host, local, args.port)
-        say(f"дорога к борту открыта: http://127.0.0.1:{local}")
-
-        drone = HttpRobot(f"http://127.0.0.1:{local}", name=args.name)
-        st = wait_online(drone, seconds=15)
+        drone = HttpRobot(url, name=args.name)
+        say(f"зову борт: {url}")
+        try:
+            st = wait_online(drone, seconds=15)
+        except RobotError as exc:
+            # Программа на борту запустилась (её строку мы видели выше), а снаружи её не
+            # слышно — значит дело не в программе, а в пробросе порта. Говорим об этом
+            # прямо: искать в железе дешевле, чем перезапускать агент по кругу.
+            raise RobotError(
+                f"{exc}\n"
+                f"           борт работает, но снаружи не отвечает. Похоже, на этом дроне\n"
+                f"           нет проброса {args.net_port} → {args.port} внутрь контейнера.\n"
+                f"           Проверьте у того, кто настраивал дрон, или: "
+                f"curl {url}/status"
+            ) from exc
         if not st.get("camera"):
             say("КАМЕРА НЕ ГОТОВА — кадров не будет, взлетать не надо")
 
@@ -365,7 +355,7 @@ def main(argv: list[str] | None = None) -> int:
         print()
         return 0
     finally:
-        shutdown(drone, host, tunnel, agent_proc, stop, args.keep)
+        shutdown(drone, host, agent_proc, stop, args.keep)
 
 
 if __name__ == "__main__":

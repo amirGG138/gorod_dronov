@@ -40,7 +40,7 @@ class TestMiniYaml(unittest.TestCase):
 
     def test_unknown_syntax_fails_loudly(self):
         with self.assertRaises(ConfigError):
-            parse_mini_yaml("missions:\n  - fire\n  - delivery\n")
+            parse_mini_yaml("pads:\n  - [1, 1]\n  - [4, 4]\n")
 
 
 class TestConfigAccess(unittest.TestCase):
@@ -62,8 +62,6 @@ class TestConfigAccess(unittest.TestCase):
 
     def test_defaults_match_the_regulations(self):
         self.assertEqual(self.cfg.get("rules.water_dwell"), 3.0)
-        self.assertEqual(self.cfg.get("rules.load_dwell"), 5.0)
-        self.assertEqual(self.cfg.get("rules.escort_max_lag"), 2)
         self.assertEqual(self.cfg.field.cell, 0.8)
         self.assertEqual(list(self.cfg.field.size), [6, 6])
         self.assertFalse(self.cfg.get("flags.use_vup"))  # микродрона у нас нет

@@ -1,7 +1,7 @@
 """Полная попытка по сети: диспетчер, ровер и дрон — разные программы.
 
-Тест медленный (стоянки 3 и 5 секунд идут в реальном времени, их нельзя ускорить,
-не соврав про регламент), поэтому по умолчанию пропускается:
+Тест медленный (стоянка у башни в 3 секунды идёт в реальном времени, её нельзя
+ускорить, не соврав про регламент), поэтому по умолчанию пропускается:
 
     CITY_SLOW_TESTS=1 python3 -m unittest tests.test_http_e2e
 
@@ -42,7 +42,6 @@ class TestRunOverNetwork(unittest.TestCase):
                     "--rover-url", self.rover_url,
                     "--drone-url", self.drone_url,
                     "--fire-level", "1",
-                    "--pickup", "2,3", "--dropoff", "3,4",
                     "--quiet", "--logs", tmp,
                 ]
             )
@@ -71,7 +70,7 @@ class TestRunOverNetwork(unittest.TestCase):
 
         # стоянки засчитаны по факту опроса, а не по факту вызова sleep
         dwells = [e for e in events if e["type"] == "DWELL"]
-        self.assertEqual(len(dwells), 2)
+        self.assertEqual(len(dwells), 1)  # уровень пожара 1 = один забор воды
         for d in dwells:
             self.assertTrue(d["counted"], d)
             self.assertGreaterEqual(d["seconds"], 3.0)

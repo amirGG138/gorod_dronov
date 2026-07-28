@@ -8,11 +8,8 @@ from city.rules import (
     RuleSet,
     Scenario,
     compile_plan,
-    delivery_route,
-    escort_lag_ok,
     fire_route,
-    load_dwell_valid,
-    mission_order,
+    plan_reasons,
     plan_total_energy,
     water_dwell_valid,
 )
@@ -29,8 +26,6 @@ def scenario(**kw):
     base = dict(
         fire_cell=(4, 2),
         fire_level=2,
-        pickup=(0, 0),
-        dropoff=(5, 5),
         tower=(1, 3),
         charge=(3, 3),
         rover_start=(3, 3),
@@ -81,18 +76,6 @@ class TestDwell(unittest.TestCase):
     def test_wrong_cell_kills_the_dwell(self):
         self.assertFalse(water_dwell_valid(5.0, moved=False, in_zone=False, led_on=True))
 
-    def test_load_dwell_needs_five_seconds(self):
-        self.assertFalse(load_dwell_valid(4.9, moved=False, in_zone=True, led_on=True))
-        self.assertTrue(load_dwell_valid(5.0, moved=False, in_zone=True, led_on=True))
-
-
-class TestEscort(unittest.TestCase):
-    def test_two_cells_is_still_ok(self):
-        self.assertTrue(escort_lag_ok((3, 3), (3, 1)))
-
-    def test_three_cells_is_a_violation(self):
-        self.assertFalse(escort_lag_ok((3, 3), (3, 0)))
-
 
 class TestFireRoute(unittest.TestCase):
     def test_level_equals_number_of_cycles(self):
@@ -111,59 +94,41 @@ class TestFireRoute(unittest.TestCase):
             fire_route(field(), (3, 3), (4, 2), 0, (1, 3), RULES)
 
 
-class TestDeliveryRoute(unittest.TestCase):
-    def test_beacon_on_for_the_whole_mission(self):
-        route = delivery_route(field(), (3, 3), (0, 0), (5, 5), RULES)
-        leds = [a for a in route.actions if a.kind == "led"]
-        self.assertEqual([a.led for a in leds], ["blink", "off"])
-        self.assertEqual(route.actions[0].kind, "led")  # мигалка до начала движения
+class TestPlanReasons(unittest.TestCase):
+    """Лог решений: план обязан объяснять себя по-русски, даже когда миссия одна."""
 
-    def test_five_second_load(self):
-        route = delivery_route(field(), (3, 3), (0, 0), (5, 5), RULES)
-        dwell = next(a for a in route.actions if a.dwell_kind == "load")
-        self.assertEqual(dwell.seconds, 5.0)
-        self.assertEqual(dwell.cell, (0, 0))
+    def test_reasons_name_the_only_mission_and_the_cycles(self):
+        reasons = plan_reasons(field(), scenario(), RULES)
+        text = " ".join(reasons)
+        self.assertIn("Пожар", text)
+        self.assertIn("уровень 2", text)
 
-    def test_route_blocked_by_unextinguished_fire(self):
-        # пожар на дороге в горлышке коридора: объехать нечем
-        f = Field(size=(6, 6), cell=0.8, buildings=[(0, 1), (1, 1)])
+    def test_approach_cell_is_stated(self):
+        reasons = plan_reasons(field(), scenario(), RULES)
+        spot = field().approach((4, 2), (1, 3))
+        self.assertTrue(any(str(list(spot)) in r for r in reasons))
+
+    def test_unreachable_fire_is_reported(self):
+        # горящий дом заперт домами со всех сторон: подъезжать некуда
+        f = Field(size=(6, 6), cell=0.8, buildings=[(2, 2), (1, 2), (3, 2), (2, 1), (2, 3)])
         with self.assertRaises(RouteBlocked):
-            delivery_route(f, (3, 3), (0, 0), (5, 5), RULES, blocked=[(1, 0)])
-
-
-class TestMissionOrder(unittest.TestCase):
-    def test_fire_first_by_score(self):
-        order, reasons = mission_order(field(), scenario(), {"fire": 3, "delivery": 1}, RULES)
-        self.assertEqual(order, ["fire", "delivery"])
-        self.assertTrue(any("опасность" in r for r in reasons))
-
-    def test_fire_forced_first_when_delivery_cannot_pass(self):
-        f = Field(size=(6, 6), cell=0.8, buildings=[(0, 1), (1, 1)])
-        sc = scenario(fire_cell=(1, 0), fire_level=1, charge=(3, 3), rover_start=(3, 3))
-        order, reasons = mission_order(f, sc, {"fire": 0, "delivery": 9}, RULES)
-        self.assertEqual(order[0], "fire")
-        self.assertIn("доставка не проходит мимо пожара — сначала тушим", reasons)
+            plan_reasons(f, scenario(fire_cell=(2, 2)), RULES)
 
 
 class TestPlan(unittest.TestCase):
-    def test_plan_covers_both_missions(self):
-        actions, moves, end = compile_plan(field(), scenario(), ["fire", "delivery"], RULES)
-        self.assertEqual(end, (5, 5))
+    def test_plan_is_the_fire_mission_only(self):
+        actions, moves, end = compile_plan(field(), scenario(), RULES)
         self.assertGreater(moves, 0)
-        self.assertEqual({a.mission for a in actions}, {"fire", "delivery"})
+        self.assertEqual({a.mission for a in actions}, {"fire"})
 
-    def test_delivery_after_fire_may_cross_the_burnt_cell(self):
-        # пожар на дороге: до тушения клетка закрыта, после — открыта
-        f = Field(size=(6, 6), cell=0.8)
-        sc = scenario(fire_cell=(3, 2), fire_level=1)
-        first, _, _ = compile_plan(f, sc, ["delivery", "fire"], RULES)
-        for a in first:
-            if a.mission == "delivery":
-                self.assertNotIn((3, 2), a.path)
+    def test_plan_starts_from_the_rover_cell(self):
+        actions, _, _ = compile_plan(field(), scenario(rover_start=(0, 0)), RULES)
+        first_drive = next(a for a in actions if a.kind == "drive")
+        self.assertEqual(first_drive.path[0], (0, 0))
 
     def test_budget_includes_return_and_reserve(self):
         f = field()
-        _, moves, end = compile_plan(f, scenario(), ["fire", "delivery"], RULES)
+        _, moves, end = compile_plan(f, scenario(), RULES)
         total, reason = plan_total_energy(f, scenario(), moves, end, RULES)
         back = Field.moves(f.astar(end, (3, 3)))
         self.assertEqual(total, moves + back + RULES.energy_reserve)

@@ -18,7 +18,7 @@ EVENT_TYPES = (
     "RUN_START",
     "ROBOT",
     "SURVEY",
-    "MISSION_ORDER",
+    "PLAN_CHOSEN",
     "PLAN",
     "CHARGED",
     "MOVE",
@@ -26,9 +26,7 @@ EVENT_TYPES = (
     "LED",
     "FIRE_CYCLE",
     "FIRE_EXTINGUISHED",
-    "DELIVERY_DONE",
     "PERSON_FOUND",
-    "ESCORT",
     "VUP_ABSENT",
     "ENERGY_BLOCK",
     "SAFETY",
@@ -89,11 +87,11 @@ class Log:
             return f"{r.get('name')} ({r.get('role')}) {r.get('url')} {_fmt_cell(r.get('cell'))}"
         if type_ == "CHARGED":
             return f"+{r.get('units')} ед. (стоянка {r.get('seconds')}с)"
-        if type_ == "MISSION_ORDER":
-            return " -> ".join(r.get("order", []))
+        if type_ == "PLAN_CHOSEN":
+            return f"миссия={r.get('mission')}"
         if type_ == "LED":
             return f"мигалка={r.get('mode')}"
-        if type_ in ("FIRE_CYCLE", "FIRE_EXTINGUISHED", "DELIVERY_DONE", "PERSON_FOUND"):
+        if type_ in ("FIRE_CYCLE", "FIRE_EXTINGUISHED", "PERSON_FOUND"):
             extra = " ".join(f"{k}={v}" for k, v in r.items() if k not in ("t", "type", "reason"))
             return extra
         if type_ == "DONE":
