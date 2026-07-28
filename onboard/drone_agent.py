@@ -40,6 +40,10 @@
   без --allow-scan откажет и на это. Перелёт в чужую клетку (/goto) по-прежнему
   закрыт ключом --allow-goto. Причина ограничения: на рабочей высоте камера видит
   меньше, чем угол поля, поэтому отлетать нужно, а вот улетать — нет.
+* Курс с --frame body дрон теряет сам, а yaw=0.0 его не держит: по документации это
+  «не менять курс», то есть каждая команда закрепляет накопленный увод. Держим курс
+  по метке своей площадки — так же, как это сделано в стенде hold_aruco/ и в
+  прошлогоднем sverh_snake/Archipelago2026/fly_head.py. Выключается --no-yaw-hold.
 
 Требуется только стандартная библиотека + sverk_interfaces + cv2/numpy, которые на
 борту уже стоят. Режим --dry позволяет запустить файл где угодно без железа.
@@ -50,11 +54,12 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import math
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.1"
+VERSION = "1.2"
 
 # Сколько последних command_id помнить, чтобы узнать повтор. Команд за попытку
 # десятки, так что помним с запасом и всё равно не растём в памяти.
@@ -132,6 +137,135 @@ def encode_jpeg(frame, color: str = "bgr") -> bytes | None:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+#  КУРС ПО МЕТКЕ
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# navigate(frame_id="body", yaw=0.0) курс НЕ держит: по документации это «не менять
+# курс», а дрон на этой сборке потихоньку отворачивается сам — значит каждая команда
+# закрепляет уже накопленный увод (sverh_snake/Archipelago2026/fly_head.py:72).
+# Телеметрии, по которой курс видно всем остальным, у нас нет: get_telemetry виснет.
+#
+# Зато под монитором лежит метка его площадки, а метки поля уложены одинаково —
+# поворот метки в кадре и показывает, как повёрнут сам дрон. Отсюда весь механизм:
+# после взлёта запоминаем поворот метки (эталон курса), дальше каждой команде
+# перелёта подмешиваем доворот к нему штатным аргументом yaw, а на долгом висении
+# доворачиваем отдельным тактом. Ровно это делает стенд hold_aruco/hold_aruco.py.
+#
+# Всё это касается только --frame body. В aruco_map yaw — абсолютный курс в осях
+# карты, там yaw=0.0 и есть удержание, а курс дрону считает бортовая локализация.
+
+# Словарь 4X4_1000, а не 4X4_50: маркеры нашего поля 50, 60, 62, 7 (docs/field-map/),
+# и 60 с 62 в словарь на 50 элементов не влезают. Тот же словарь стоит по умолчанию
+# у бортовой aruco_detect_node (dictionary_id=3), так что опознание совпадёт.
+_DETECTOR = None  # собирается один раз при первом кадре: cv2 импортируется лениво
+
+
+def _detector():
+    """Опознаватель меток: (словарь, параметры, детектор-объект). Словарь None — нечем.
+
+    Объект-детектор есть только с OpenCV 4.7+; на борту 4.5.4, там работает старая
+    функция cv2.aruco.detectMarkers — поэтому третий элемент бывает None, и это норма.
+    """
+    global _DETECTOR
+    if _DETECTOR is not None:
+        return _DETECTOR
+    try:
+        import cv2
+
+        aruco = cv2.aruco
+    except (ImportError, AttributeError):
+        _DETECTOR = (None, None, None)
+        return _DETECTOR
+    dictionary = (aruco.getPredefinedDictionary if hasattr(aruco, "getPredefinedDictionary")
+                  else aruco.Dictionary_get)(aruco.DICT_4X4_1000)
+    params = (aruco.DetectorParameters() if hasattr(aruco, "DetectorParameters")
+              else aruco.DetectorParameters_create())
+    detector = aruco.ArucoDetector(dictionary, params) if hasattr(aruco, "ArucoDetector") else None
+    _DETECTOR = (dictionary, params, detector)
+    return _DETECTOR
+
+
+def marker_angle(frame) -> float | None:
+    """Поворот ближайшей к центру кадра метки, радианы. None — метки не видно.
+
+    Ближайшая к центру — та, над которой дрон и висит: своя площадка. Угол берётся
+    по верхнему ребру квадрата. Вырожденные метки (сторона в один пиксель) отсеяны:
+    у них углы шумят как попало.
+    """
+    import cv2
+    import numpy as np
+
+    dictionary, params, detector = _detector()
+    if dictionary is None:
+        return None
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    if detector is not None:
+        corners, ids, _ = detector.detectMarkers(gray)
+    else:
+        corners, ids, _ = cv2.aruco.detectMarkers(gray, dictionary, parameters=params)
+    if ids is None or len(ids) == 0:
+        return None
+
+    cx, cy = frame.shape[1] / 2.0, frame.shape[0] / 2.0
+    best = None
+    for quad in corners:
+        pts = np.asarray(quad, np.float32).reshape(-1, 2)
+        x, y = pts.mean(axis=0)
+        side = max(float(np.linalg.norm(pts[i] - pts[(i + 1) % 4])) for i in range(4))
+        if side <= 1.0:
+            continue
+        away = math.hypot(float(x) - cx, float(y) - cy)
+        if best is None or away < best[0]:
+            edge = pts[1] - pts[0]
+            best = (away, math.atan2(float(edge[1]), float(edge[0])))
+    return best[1] if best is not None else None
+
+
+def turn_error(angle: float, reference: float, limit_deg: float) -> float | None:
+    """Насколько дрон отвернулся от курса взлёта, радианы (−π…π). None — не верим замеру.
+
+    Увод больше limit_deg неправдоподобен: каждая команда navigate курс всё-таки
+    удерживает, а метка под монитором одна и та же. Столько даёт либо сбой опознания
+    углов метки, либо чужая метка, положенная повёрнутой, — отработать такой «увод»
+    значит развернуть дрон на десятки градусов на ровном месте. Поэтому не поправка
+    нулём, а честное «замер негодный»: про это надо сказать в лог.
+    """
+    error = (angle - reference + math.pi) % (2 * math.pi) - math.pi
+    return None if abs(error) > math.radians(limit_deg) else error
+
+
+def yaw_fix(error: float, dead_deg: float, fix_deg: float) -> float:
+    """Доворот для очередного navigate, радианы.
+
+    Знак: turn_error даёт увод ПРОТИВ часовой, и положительный yaw в body — тоже
+    против часовой (в документации set_yaw(-pi/2) описан как поворот по часовой),
+    значит отработать увод — скомандовать ему обратный знак.
+
+    Отдаём не весь увод разом, а не больше fix_deg: на большом довороте кадр
+    смазывается сильнее, чем стоит того выигрыш. Мелочь внутри dead_deg не трогаем
+    вовсе — иначе дрон дёргался бы на шуме опознания метки.
+    """
+    if abs(error) < math.radians(dead_deg):
+        return 0.0
+    limit = math.radians(fix_deg)
+    return max(-limit, min(limit, -error))
+
+
+def to_body(forward: float, left: float, error: float, dead_deg: float):
+    """Вектор из осей поля в оси корпуса с учётом того, что дрон отвернуло.
+
+    Смещение до точки обзора считается в осях ПОЛЯ (метры от центра поля), а команда
+    с frame_id="body" уходит в осях корпуса. Пока дрон смотрит куда взлетал, это одно
+    и то же; отвернувшийся дрон без этого поворота полетел бы вкось — тем сильнее,
+    чем больше увод.
+    """
+    if abs(error) < math.radians(dead_deg):
+        return forward, left
+    c, s = math.cos(error), math.sin(error)
+    return forward * c + left * s, -forward * s + left * c
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 #  БОРТ
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -178,8 +312,13 @@ class Agent:
         self._seq = 0
         self._done: dict[str, dict] = {}  # command_id -> уже выданный ответ
         self._done_lock = threading.Lock()
+        self._hw_lock = threading.Lock()
         self._last_move = time.monotonic()
         self._last_request = time.monotonic()
+        # Курс: эталон снимается по метке после взлёта, drift — последний замер увода.
+        self._yaw_ref: float | None = None
+        self._yaw_drift: float | None = None
+        self._yaw_warned = False
 
     # --- железо -------------------------------------------------------------
 
@@ -224,6 +363,13 @@ class Agent:
             st["dry"] = True  # честно: на том конце заглушка, а не аппарат
         if self.last_error:
             st["last_error"] = self.last_error
+        if self.yaw_hold:
+            # Градусы, а не радианы: это читает человек в пульте. yaw_ref = null
+            # означает «курс держать не по чему», а не «курс ноль».
+            st["yaw_ref"] = None if self._yaw_ref is None else round(math.degrees(self._yaw_ref))
+            st["yaw_drift"] = (
+                None if self._yaw_drift is None else round(math.degrees(self._yaw_drift))
+            )
         if self.args.telemetry and self.drone is not None:
             tel, err = self._telemetry()
             if tel is None:
@@ -256,6 +402,83 @@ class Agent:
         if "err" in box:
             return None, box["err"]
         return None, f"телеметрия не ответила за {timeout:g} с"
+
+    # --- курс ---------------------------------------------------------------
+
+    @property
+    def yaw_hold(self) -> bool:
+        """Держим ли курс по метке.
+
+        Только с --frame body: в aruco_map yaw это абсолютный курс в осях карты,
+        удержание там уже встроено, и подмешивать к нему свой доворот — значит
+        крутить дрон дважды.
+        """
+        return not self.args.no_yaw_hold and self.args.frame == "body"
+
+    def _see_angle(self, what: str) -> float | None:
+        """Поворот метки под дроном, радианы. None — нечем или не видно.
+
+        Кадр берётся тем же путём, что и /shot, и через ту же очередь к железу:
+        два потока на одном ROS-узле рвут wait set. Любой отказ здесь — не ошибка
+        команды: не увидели метку, значит курс на этот раз не правим.
+        """
+        if self.dry or self.drone is None or not self.camera_ok:
+            return None
+        try:
+            frame = self._hw(
+                what, lambda: self.drone.image.take_picture(timeout=2.0), timeout=5.0
+            )
+        except Exception as exc:  # noqa: BLE001 — кадра нет, курс просто не правим
+            say(f"курс: кадр не получен ({exc})")
+            return None
+        if frame is None or getattr(frame, "ndim", 0) != 3 or frame.size == 0:
+            return None
+        try:
+            return marker_angle(frame)
+        except Exception as exc:  # noqa: BLE001
+            say(f"курс: метку разобрать не вышло ({exc})")
+            return None
+
+    def _set_yaw_ref(self) -> None:
+        """Запомнить курс взлёта по метке. Метки не видно — курс держать не по чему."""
+        if not self.yaw_hold or self.dry:
+            return  # в заглушке нет ни камеры, ни курса, и врать про них незачем
+        angle = self._see_angle("эталон курса")
+        self._yaw_ref = angle
+        self._yaw_drift = None if angle is None else 0.0
+        self._yaw_warned = False
+        if angle is None:
+            say("курс: метки под дроном не видно — держать курс не по чему")
+        else:
+            say(f"курс: эталон {math.degrees(angle):+.0f}° (по метке своей площадки)")
+
+    def _yaw_error(self) -> float | None:
+        """Текущий увод от курса взлёта, радианы. None — замера нет или он негоден."""
+        if not self.yaw_hold or self._yaw_ref is None:
+            return None
+        angle = self._see_angle("замер курса")
+        if angle is None:
+            return None
+        error = turn_error(angle, self._yaw_ref, self.args.yaw_max)
+        if error is None:
+            if not self._yaw_warned:
+                say(f"курс: поворот метки больше {self.args.yaw_max:g}° — дрон так не "
+                    f"отворачивает. Похоже, сбой опознания метки; курс не правлю")
+                self._yaw_warned = True
+            return None
+        self._yaw_drift = error
+        return error
+
+    def _yaw_turn(self) -> float:
+        """Доворот, который надо подмешать в ближайший navigate, радианы."""
+        error = self._yaw_error()
+        if error is None:
+            return 0.0
+        turn = yaw_fix(error, self.args.yaw_dead, self.args.yaw_fix)
+        if turn:
+            say(f"курс: увод {math.degrees(error):+.0f}°, доворачиваю на "
+                f"{math.degrees(turn):+.0f}°")
+        return turn
 
     # --- команды ------------------------------------------------------------
 
@@ -296,10 +519,19 @@ class Agent:
             job = self._job = Job(self._seq, name)
             self._busy = True
             self.current = name
+            was = self.state
 
         def worker():
             try:
                 fn(job)
+            except NavRefused as exc:
+                # Команду не приняли — аппарат не двинулся. Возвращаем прежнее
+                # состояние, чтобы следующая команда (например, возврат на метку)
+                # прошла проверки.
+                if self._job is job:
+                    self.state = was
+                    self.last_error = f"{name}: {exc}"
+                say(f"ОТКАЗ в «{name}»: {exc} (остаюсь как был: {was})")
             except Exception as exc:  # noqa: BLE001 — падать целиком борту нельзя
                 if self._job is job:
                     self.state = "error"
@@ -313,6 +545,23 @@ class Agent:
 
         threading.Thread(target=worker, daemon=True).start()
         return {"accepted": True, "command": name}
+
+    def _hw(self, what: str, fn, timeout: float):
+        """Обращаться к железу строго по одному потоку за раз.
+
+        sverk_interfaces крутит spin общего узла прямо в вызывающем потоке
+        (spin_until_future_complete в navigate, spin_once в take_picture), а два
+        потока на одном узле рвут wait set: «wait set index for status
+        subscription is out of bounds». Команда и запрос кадра приходят по сети
+        независимо и попадают в разные потоки, так что очередь к железу нужна
+        своя — библиотека её не держит.
+        """
+        if not self._hw_lock.acquire(timeout=timeout):
+            raise Busy(f"{what}: борт {timeout:g} с занят другим обращением к железу")
+        try:
+            return fn()
+        finally:
+            self._hw_lock.release()
 
     def _set(self, job: Job, state: str | None = None, alt: float | None = None,
              moved: bool = False) -> bool:
@@ -352,14 +601,14 @@ class Agent:
             wait = 2.0
         else:
             # Ровно один navigate: повторный вызов переинициализирует траекторию.
-            resp = self.drone.control.navigate(
+            resp = self._hw("взлёт", lambda: self.drone.control.navigate(
                 x=0.0, y=0.0, z=alt, yaw=0.0,
                 speed=self.args.climb_speed, frame_id="body", auto_arm=True,
-            )
+            ), timeout=20.0)
             ok = getattr(resp, "success", True)
             say(f"взлёт принят: {ok} {getattr(resp, 'message', '')}")
             if resp is not None and not ok:
-                raise RuntimeError(f"взлёт не принят: {getattr(resp, 'message', '')}")
+                raise NavRefused(f"взлёт не принят: {getattr(resp, 'message', '')}")
             # Ждём набор высоты плюс время на успокоение: командовать раскачанным
             # дроном нельзя, и кадр с качающегося борта смазан.
             wait = alt / max(self.args.climb_speed, 0.05) + self.args.settle
@@ -371,6 +620,9 @@ class Agent:
             say("взлёт прерван более важной командой — состояние не трогаю")
             return
         self._set(job, state="hover", moved=True)
+        # Эталон курса снимается ЗДЕСЬ, после паузы на успокоение: замер на раскачке
+        # испортил бы все довороты до конца полёта.
+        self._set_yaw_ref()
         say(f"вишу на {alt:g} м")
 
     def land(self) -> dict:
@@ -378,6 +630,9 @@ class Agent:
 
     def _land(self, job: Job) -> None:
         self._set(job, state="landing")
+        # Эталон курса живёт ровно один полёт: следующий взлёт снимет свой. Сбрасываем
+        # до посадки, чтобы фоновый доворот не крутил дрон, пока тот садится.
+        self._yaw_ref, self._yaw_drift = None, None
         say("ПОСАДКА")
         if self.dry:
             self._wait(job, 2.0)
@@ -386,9 +641,11 @@ class Agent:
         for attempt in range(1, 4):
             try:
                 try:
-                    resp = self.drone.control.land()
+                    resp = self._hw("посадка", self.drone.control.land, timeout=25.0)
                 except TypeError:  # сборка со старой сигнатурой
-                    resp = self.drone.control.land(timeout=10.0)
+                    resp = self._hw(
+                        "посадка", lambda: self.drone.control.land(timeout=10.0), timeout=25.0
+                    )
             except Exception as exc:  # noqa: BLE001
                 say(f"посадка: попытка {attempt} сорвалась — {exc}")
                 if not self._wait(job, 1.0):
@@ -499,20 +756,29 @@ class Agent:
         error?)». Поэтому с `--frame body` та же точка поля пересчитывается в
         смещение от текущего места — в body координаты относительные, а z это
         приращение высоты, а не сама высота (docs/zmeyka.md).
+
+        Там же, в body, к команде подмешивается доворот курса: сам по себе yaw=0.0
+        курс не держит, а увод разворачивает и смещение — поэтому вектор ещё и
+        поворачивается в оси корпуса.
         """
         if self.dry:
             wait = 2.0
         else:
-            tx, ty, tz = x, y, alt
+            tx, ty, tz, turn = x, y, alt, 0.0
             if self.args.frame == "body":
                 tx, ty, tz = x - self.xy[0], y - self.xy[1], alt - self.alt
-                say(f"{what}: смещаюсь на ({tx:+.2f}, {ty:+.2f}, {tz:+.2f}) м от себя")
-            resp = self.drone.control.navigate(
-                x=tx, y=ty, z=tz, yaw=0.0, speed=self.args.speed,
+                error = self._yaw_error()
+                if error is not None:
+                    tx, ty = to_body(tx, ty, error, self.args.yaw_dead)
+                    turn = yaw_fix(error, self.args.yaw_dead, self.args.yaw_fix)
+                say(f"{what}: смещаюсь на ({tx:+.2f}, {ty:+.2f}, {tz:+.2f}) м от себя"
+                    + (f", доворот {math.degrees(turn):+.0f}°" if turn else ""))
+            resp = self._hw(what, lambda: self.drone.control.navigate(
+                x=tx, y=ty, z=tz, yaw=turn, speed=self.args.speed,
                 frame_id=self.args.frame, auto_arm=True,
-            )
+            ), timeout=20.0)
             if resp is not None and not getattr(resp, "success", True):
-                raise RuntimeError(f"{what} не принят: {getattr(resp, 'message', '')}")
+                raise NavRefused(f"{what} не принят: {getattr(resp, 'message', '')}")
             wait = self.args.hop_wait
         if not self._wait(job, wait):
             say(f"{what} прерван более важной командой — положение не переписываю")
@@ -529,7 +795,11 @@ class Agent:
         if not self.camera_ok:
             raise NoFrame("камера не готова (нет cv2/numpy или патча yuv)")
         try:
-            frame = self.drone.image.take_picture(timeout=2.0)
+            frame = self._hw(
+                "кадр", lambda: self.drone.image.take_picture(timeout=2.0), timeout=20.0
+            )
+        except Busy as exc:
+            raise NoFrame(str(exc)) from exc
         except Exception as exc:  # noqa: BLE001
             raise NoFrame(f"камера не отдала кадр: {exc}") from exc
         if frame is None or getattr(frame, "ndim", 0) != 3 or frame.size == 0:
@@ -552,6 +822,53 @@ class Agent:
         say("СТОП — сажусь")
         return self.start("stop-land", self._land, preempt=True)
 
+    # --- курс на висении ----------------------------------------------------
+
+    def _turn(self, turn: float, job: Job) -> None:
+        """Один navigate «стой на месте, довернись»: только курс, без перемещения."""
+        resp = self._hw("доворот", lambda: self.drone.control.navigate(
+            x=0.0, y=0.0, z=0.0, yaw=float(turn), speed=self.args.speed,
+            frame_id="body", auto_arm=True,
+        ), timeout=20.0)
+        if resp is not None and not getattr(resp, "success", True):
+            raise NavRefused(f"доворот не принят: {getattr(resp, 'message', '')}")
+        # Паузу выжидаем, но состояние не трогаем вовсе: дрон как висел, так и висит,
+        # а since_move должен остаться «когда двигался», иначе доворот сам себе
+        # отодвигает следующую проверку тишины.
+        self._wait(job, self.args.yaw_wait)
+
+    def keeper(self) -> None:
+        """Доворачивать курс, пока дрон просто висит.
+
+        Перелёты курс правят сами (поправка уходит в их же navigate), но между
+        командами монитор висит над своей меткой минутами — и всё это время увод
+        копится, ничем не отрабатываясь. Отсюда отдельный такт.
+
+        Влезать в работу нельзя: доворот идёт только когда борт свободен И с
+        последнего движения прошёл целый период. Иначе такт попадал бы ровно между
+        «отлетел» и «снял кадр», и диспетчер получал бы 409 «занят» на свою команду.
+        """
+        period = self.args.yaw_period
+        if period <= 0 or self.dry:
+            return
+        while True:
+            time.sleep(min(period, 1.0))
+            if not self.yaw_hold or self._yaw_ref is None:
+                continue
+            if self.state != "hover" or self._busy:
+                continue
+            if time.monotonic() - self._last_move < period:
+                continue
+            turn = self._yaw_turn()
+            if not turn:
+                continue
+            try:
+                self.start("yaw", lambda job, t=turn: self._turn(t, job))
+            except Busy:
+                # Между замером и командой борт успели занять — доворот не состоялся,
+                # и молчать об этом нельзя: в логе уже стоит «доворачиваю».
+                say("курс: борт занят, доворот отложен до следующего такта")
+
     # --- сторож -------------------------------------------------------------
 
     def touch(self) -> None:
@@ -565,7 +882,13 @@ class Agent:
         while True:
             time.sleep(0.5)
             quiet = time.monotonic() - self._last_request
-            if quiet > limit and self.state in ("taking_off", "hover"):
+            # «error» в списке намеренно: дрон, у которого сорвалась команда, висит
+            # ровно так же, как исправный, и без этого остаётся в воздухе навсегда —
+            # Failsafe обязан сажать по факту «мы в воздухе», а не по факту «всё хорошо».
+            aloft = self.state in ("taking_off", "hover") or (
+                self.state == "error" and self.alt > 0.0
+            )
+            if quiet > limit and aloft:
                 say(f"СТОРОЖ: {quiet:.0f} с без команд с ноутбука — сажусь сам")
                 self._last_request = time.monotonic()
                 # Вытесняет, а не встаёт в очередь: посадка по Failsafe не должна
@@ -583,6 +906,16 @@ class Refused(Exception):
 
 class NoFrame(Exception):
     pass
+
+
+class NavRefused(Exception):
+    """Полётный контроллер не принял navigate — значит дрон никуда и не полетел.
+
+    Отличается от прочих ошибок тем, что аппарат остался ровно там же и таким же:
+    висел — висит, стоял — стоит. Поэтому состояние откатывается на то, что было
+    до команды, а не становится «error». Иначе висящий дрон запирается в воздухе:
+    look и goto требуют hover, и вернуть его на метку будет уже нечем.
+    """
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -688,6 +1021,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--scan-radius", type=float, default=1.0,
         help="дальше этого от своей метки при облёте не улетать, м",
     )
+    p.add_argument(
+        "--no-yaw-hold", action="store_true",
+        help="не держать курс по метке (по умолчанию держим, но только с --frame body)",
+    )
+    p.add_argument("--yaw-dead", type=float, default=3.0,
+                   help="увод меньше этого не трогаем: шум опознания метки, град")
+    p.add_argument("--yaw-fix", type=float, default=15.0,
+                   help="предел доворота за одну команду, град")
+    p.add_argument("--yaw-max", type=float, default=45.0,
+                   help="увод больше этого — сбой опознания метки, а не поворот дрона, град")
+    p.add_argument("--yaw-period", type=float, default=8.0,
+                   help="как часто доворачивать курс на висении, с (0 — не доворачивать)")
+    p.add_argument("--yaw-wait", type=float, default=2.0, help="пауза на доворот, с")
     p.add_argument("--telemetry", action="store_true", help="добавлять телеметрию в статус (может виснуть)")
     p.add_argument(
         "--color", choices=("bgr", "rgb"), default="bgr",
@@ -718,7 +1064,13 @@ def main(argv: list[str] | None = None) -> int:
         agent.close()
         return 1
     threading.Thread(target=agent.watchdog, daemon=True).start()
+    threading.Thread(target=agent.keeper, daemon=True).start()
 
+    if agent.yaw_hold:
+        say(f"курс держу по метке: раз в {args.yaw_period:g} с на висении"
+            if args.yaw_period > 0 else "курс держу по метке: только в командах перелёта")
+    elif not args.no_yaw_hold:
+        say(f"курс по метке не держу: с --frame {args.frame} его держит бортовая локализация")
     say(f"агент «{args.name}» слушает порт {args.port}" + (" (ЗАГЛУШКА)" if args.dry else ""))
     say(f"проверка: curl http://<адрес-дрона>:{args.port}/status")
     say("остановить: Ctrl+C")
