@@ -22,6 +22,7 @@ EVENT_TYPES = (
     "SURVEY",
     "PLAN_CHOSEN",
     "PLAN",
+    "LLM",
     "CHARGED",
     "MOVE",
     "DWELL",
@@ -102,6 +103,14 @@ class Log:
             return f"+{r.get('units')} ед. (стоянка {r.get('seconds')}с)"
         if type_ == "PLAN_CHOSEN":
             return f"миссия={r.get('mission')}"
+        if type_ == "LLM":
+            if not r.get("ok"):
+                verdict = "НЕ ОТВЕТИЛА"
+            elif r.get("accepted") is None:
+                verdict = "ответила"
+            else:
+                verdict = "предложение принято" if r.get("accepted") else "предложение отклонено"
+            return f"{r.get('use')} {r.get('model')} {r.get('ms', 0) / 1000:.1f}с {verdict}"
         if type_ == "LED":
             return f"мигалка={r.get('mode')}"
         if type_ in ("FIRE_CYCLE", "FIRE_EXTINGUISHED", "PERSON_FOUND"):
