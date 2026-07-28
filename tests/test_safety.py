@@ -144,13 +144,13 @@ class TestMonitorsAreNeverLeftFlying(unittest.TestCase):
         for name, drone in fleet.monitors.items():
             self.assertEqual(drone.state, "landed", f"{name} остался в воздухе")
 
-    def test_survey_does_not_pretend_the_level_came_from_frames(self):
-        """Клетку кадр даёт, а уровень пожара — нет: «огонёк» на поле числа не несёт.
+    def test_survey_names_the_source_of_the_level(self):
+        """Уровень пожара измерен по кадрам — и в логе это сказано прямо.
 
-        Раньше здесь проверялось, что вся сцена берётся из config.yaml: разбора
-        кадров ещё не было. Теперь клетка приходит с картинки, и охранять надо уже
-        не это, а честность второго источника — иначе выдуманное число рейсов за
-        водой ничем не будет отличаться в логе от измеренного.
+        Здесь охраняется честность источника, а не конкретное число. Уровень равен
+        числу огоньков на поле, значит он приходит с картинки (level_source=frames);
+        если бы он был взят из config.yaml, судья обязан увидеть это в логе, иначе
+        выдуманное число рейсов за водой ничем не отличалось бы от измеренного.
         """
         cfg = config_mod.load()
         cfg.override("flags.use_drones", True)
@@ -159,7 +159,20 @@ class TestMonitorsAreNeverLeftFlying(unittest.TestCase):
         self.assertGreaterEqual(survey["shots"], 4)
         self.assertEqual(survey["landing_unverified"], [])
         spotted = next(e for e in events if e["type"] == "FIRE_SPOTTED")
-        self.assertEqual(spotted["level_source"], "config")
+        self.assertEqual(spotted["level_source"], "frames")
+        self.assertEqual(spotted["level"], spotted["fire_count"])
+        self.assertEqual(spotted["level"], cfg.get("scenario.fire.level"))
+
+    def test_the_level_is_not_invented_when_the_fire_is_not_found(self):
+        """Разведка ничего не нашла — уровень честно берётся из настроек."""
+        cfg = config_mod.load()
+        cfg.override("flags.use_drones", True)
+        cfg.override("sim.fire_cell", "нет")  # поле без очага
+        _, events, _, _ = run_dispatcher(Dispatcher, cfg=cfg)
+        survey = [e for e in events if e["type"] == "SURVEY"][-1]
+        self.assertEqual(survey["source"], "config")
+        self.assertEqual(survey["fire_level"], cfg.get("scenario.fire.level"))
+        self.assertFalse([e for e in events if e["type"] == "FIRE_SPOTTED"])
 
 
 def _no_frame():

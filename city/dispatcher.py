@@ -63,6 +63,7 @@ class Dispatcher:
         # чтобы на площадке правился только config.yaml, а не код.
         self.pads = vision.pads_from_config(cfg)
         self.vision_settings = vision.settings(cfg)
+        self.max_fire_count = vision.max_count(cfg)
         self.survey_alt = float(cfg.get("survey.alt", MONITOR_ALT))
         # Мониторы, чья посадка не подтвердилась: попадают в лог разведки, чтобы
         # «сел» на пульте не расходилось с тем, что видно глазами над полем.
@@ -214,37 +215,50 @@ class Dispatcher:
 
         Порядок не случаен. Кадр с площадки бесплатен по времени — дрон и так
         взлетает. Облёт стоит минуты 15-минутной попытки, поэтому включается только
-        когда с площадок очага не видно, и прекращается сразу, как только он найден.
+        когда с площадок разведка не удалась, и прекращается, как только удалась.
+
+        «Удалась» — это не только «очаг найден». Кадр, на котором кучка огоньков
+        упёрлась в край, показывает клетку, но занижает число жетонов, то есть
+        степень пожара. Останавливаться на таком кадре значит недовезти воду,
+        поэтому облёт продолжается, пока кучку не увидят целиком.
         """
         seen: list[vision.Observation] = []
         self.unverified = []
         for name, drone in self.fleet.monitors.items():
             self._scan_drone(name, drone, seen, offsets=())
-            if vision.merge(seen).found and self._stop_when_found():
+            if self._enough(seen):
                 break
-        scene = vision.merge(seen)
+        scene = vision.merge(seen, self.max_fire_count)
 
-        if not scene.found and self.cfg.get("survey.second_pass", True):
+        if not scene.sure and self.cfg.get("survey.second_pass", True):
             self.log.ev(
                 "SURVEY",
                 source="drones",
                 shots=len(seen),
                 stage="pass-2",
                 reason=(
-                    "с площадок очаг не виден: на рабочей высоте кадр уже́е угла поля. "
-                    "Идём облётом точек обзора с возвратом на метку"
+                    (
+                        "с площадок очаг не виден: на рабочей высоте кадр уже́е угла поля. "
+                        if not scene.found
+                        else "очаг виден только краем кадра, по такому огоньки не сосчитать. "
+                    )
+                    + "Идём облётом точек обзора с возвратом на метку"
                 ),
             )
             for name, drone in self.fleet.monitors.items():
                 self._scan_drone(name, drone, seen, offsets=self._offsets(name))
-                if vision.merge(seen).found and self._stop_when_found():
+                if self._enough(seen):
                     break
-            scene = vision.merge(seen)
+            scene = vision.merge(seen, self.max_fire_count)
 
         self._apply_scene(scene, len(seen))
 
     def _stop_when_found(self) -> bool:
         return bool(self.cfg.get("survey.stop_when_found", True))
+
+    def _enough(self, seen: list) -> bool:
+        """Можно ли прекращать облёт: очаг найден и огоньки сосчитаны по целой кучке."""
+        return self._stop_when_found() and vision.merge(seen, self.max_fire_count).sure
 
     def _scan_drone(self, name: str, drone, seen: list, offsets: Sequence) -> None:
         """Взлёт -> кадр с метки -> точки обзора с возвратом на метку -> посадка."""
@@ -257,7 +271,7 @@ class Dispatcher:
                 self._look_and_see(name, drone, pad_xy, seen, home=None)
             for point in offsets:
                 self._look_and_see(name, drone, point, seen, home=pad_xy)
-                if seen and seen[-1].found and self._stop_when_found():
+                if self._enough(seen):
                     break
         except RobotError as exc:
             self.log.ev(
@@ -315,9 +329,15 @@ class Dispatcher:
             anchor=obs.anchor,
             markers=obs.markers_seen,
             area=round(obs.area, 1),
+            fire_count=obs.fire_count,
+            count_source=obs.count_source,
+            clipped=obs.clipped,
             shot=path,
             reason=(
-                f"очаг в клетке {list(obs.fire_cell)}, привязка кадра «{obs.anchor}»"
+                f"очаг в клетке {list(obs.fire_cell)}: огоньков {obs.fire_count} "
+                f"(счёт по «{obs.count_source}», кучка {obs.spread_m:.2f} м), "
+                f"привязка кадра «{obs.anchor}»"
+                + (f"; {obs.note}" if obs.note else "")
                 if obs.found
                 else f"очага на кадре нет: {obs.note or 'пятен нужного цвета не найдено'}"
             ),
@@ -378,10 +398,27 @@ class Dispatcher:
             )
             return
 
-        was = self.sc.fire_cell
+        was, was_level = self.sc.fire_cell, self.sc.fire_level
         self.sc.fire_cell = scene.fire_cell
         # Человек по заданию — в окне ГОРЯЩЕГО здания, поэтому ВУП летит туда же.
         self.sc.person_cell = scene.fire_cell
+        # Степень пожара = сколько огоньков лежит рядом, и это видно на кадре.
+        # Посчитанное побеждает записанное в настройках — как и клетка выше.
+        if scene.level is not None:
+            self.sc.fire_level = scene.level
+            level_source = "frames"
+            how = (
+                f"огоньков насчитано {scene.level}, значит столько же поездок за водой"
+                + (f" (по кадрам: {scene.level_votes})" if len(scene.level_votes) > 1 else "")
+                + (f"; {scene.count_note}" if scene.count_note else "")
+            )
+        else:
+            level_source = "config"
+            how = (
+                "число огоньков по кадрам не получено"
+                + (f": {scene.count_note}" if scene.count_note else "")
+                + f" — уровень берём заданный организаторами: {self.sc.fire_level}"
+            )
         self.log.ev(
             "FIRE_SPOTTED",
             cell=list(scene.fire_cell),
@@ -390,12 +427,13 @@ class Dispatcher:
             by_cell=scene.by_cell,
             drones=scene.drones,
             level=self.sc.fire_level,
-            level_source="config",
+            level_source=level_source,
+            fire_count=scene.level,
+            level_votes=scene.level_votes,
+            was_level=was_level,
             reason=(
                 f"очаг найден по кадрам: {scene.votes} из {scene.total} за клетку "
-                f"{list(scene.fire_cell)} (дроны: {', '.join(scene.drones)}). "
-                "Уровень пожара картинкой не определяется — «огонёк» числа не несёт, "
-                f"берём заданный организаторами: {self.sc.fire_level}"
+                f"{list(scene.fire_cell)} (дроны: {', '.join(scene.drones)}). " + how
             ),
         )
         self.log.ev(
@@ -405,12 +443,18 @@ class Dispatcher:
             fire=list(scene.fire_cell),
             fire_level=self.sc.fire_level,
             landing_unverified=self.unverified,
+            level_source=level_source,
             reason=(
                 f"сцена построена по кадрам мониторов"
                 + (
                     f"; в config.yaml стояла клетка {list(was)}, побеждает найденная"
                     if as_cell(was) != scene.fire_cell
                     else "; совпало с config.yaml"
+                )
+                + (
+                    f"; уровень в config.yaml был {was_level}, по кадрам {self.sc.fire_level}"
+                    if level_source == "frames" and was_level != self.sc.fire_level
+                    else ""
                 )
                 + (
                     f"; посадку не подтвердили: {', '.join(self.unverified)}"

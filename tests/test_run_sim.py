@@ -130,8 +130,24 @@ class TestSurveyByPictures(unittest.TestCase):
         spotted = next(e for e in events if e["type"] == "FIRE_SPOTTED")
         self.assertEqual(spotted["cell"], [4, 2])
         self.assertGreaterEqual(spotted["votes"], 1)
-        # Уровень пожара «огонёк» не несёт: источник обязан быть назван честно.
-        self.assertEqual(spotted["level_source"], "config")
+        # И клетка, и уровень измерены по кадрам: источник назван честно.
+        self.assertEqual(spotted["level_source"], "frames")
+        self.assertEqual(spotted["level"], 2)
+
+    def test_the_level_is_counted_from_the_pictures_too(self):
+        """На поле лежит три огонька — ровер едет за водой три раза.
+
+        Кадры важнее настроек и здесь: в config.yaml записан уровень 2, а на
+        нарисованном поле лежит три жетона. Побеждает то, что видно.
+        """
+        code, events = run_and_read(["--sim", "--drones", "--sim-fire-count", "3"])
+        self.assertEqual(code, 0)
+        spotted = next(e for e in events if e["type"] == "FIRE_SPOTTED")
+        self.assertEqual(spotted["fire_count"], 3)
+        self.assertEqual(spotted["level"], 3)
+        self.assertEqual(spotted["level_source"], "frames")
+        self.assertEqual(spotted["was_level"], 2)
+        self.assertEqual(len([e for e in events if e["type"] == "FIRE_CYCLE"]), 3)
 
     def test_picture_beats_the_config(self):
         """Очаг нарисован не там, где записан в config.yaml — план идёт по картинке."""

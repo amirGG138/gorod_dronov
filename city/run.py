@@ -59,6 +59,12 @@ def build_parser() -> argparse.ArgumentParser:
         "проверка, что диспетчер верит кадрам, а не config.yaml. "
         "«нет» — поле без очага, проверка честного отказа разведки",
     )
+    p.add_argument(
+        "--sim-fire-count",
+        type=int,
+        help="сколько огоньков положить в НАРИСОВАННОМ мире (только с --sim --drones): "
+        "проверка, что уровень пожара тоже считается по кадрам, а не берётся из config.yaml",
+    )
     p.add_argument("--logs", default="logs", help="каталог для лога попытки")
     p.add_argument("--quiet", action="store_true", help="не печатать таймлайн в консоль")
     return p
@@ -88,6 +94,8 @@ def apply_args(cfg, args) -> None:
         cfg.override("scenario.fire.level", args.fire_level)
     if args.sim_fire_cell:
         cfg.override("sim.fire_cell", args.sim_fire_cell)
+    if args.sim_fire_count is not None:
+        cfg.override("sim.fire_count", args.sim_fire_count)
 
 
 def main(argv: list[str] | None = None) -> int:

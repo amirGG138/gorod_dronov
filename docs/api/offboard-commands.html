@@ -1,0 +1,1153 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Документация Сверх - учебный конструктор программируемого квадрокоптера">
+    <title>Программирование автономных полётов - Документация Сверх</title>
+    <link rel="stylesheet" href="/static/sverk.css">
+    <link rel="stylesheet" href="/static/custom.css">
+    <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+</head>
+<body>
+    <header class="mobile-topbar" id="mobileTopbar">
+        <button class="mobile-menu-toggle" id="mobileMenuToggle" aria-label="Открыть меню" aria-expanded="false">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M3 12h18M3 6h18M3 18h18"></path>
+            </svg>
+        </button>
+        <div class="mobile-topbar-title" title="Программирование автономных полётов">Программирование автономных полётов</div>
+    </header>
+    
+    <div class="container">
+        <aside class="sidebar" id="sidebar">
+            <div class="sidebar-header">
+                <h1>Сверх Глосарий</h1>
+                <div class="search-box">
+                    <label for="doc-search" class="search-label">Поиск</label>
+                    <input type="search"
+                           id="doc-search"
+                           class="search-input"
+                           placeholder="Поиск по документации…"
+                           autocomplete="off"
+                           aria-label="Поиск по документации">
+                    <div class="search-results" id="searchResults" aria-live="polite" hidden></div>
+                </div>
+            </div>
+            <nav class="sidebar-nav">
+                <li class="nav-item has-children">
+    <div class="nav-item-header">
+        <a href="/render/README.md" class="nav-link">Введение</a>
+        
+        <button class="collapse-toggle" aria-label="Развернуть/свернуть" aria-expanded="false">
+            <svg class="collapse-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M6 12l4-4-4-4"/>
+            </svg>
+        </button>
+        
+    </div>
+    
+    <ul class="nav-children">
+        <li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/safety.md" class="nav-link">Правила техники безопасности</a>
+        
+    </div>
+    
+</li>
+    </ul>
+    
+</li><li class="nav-item has-children">
+    <div class="nav-item-header">
+        <a href="/render/flight-controller.md" class="nav-link">Взаимодействие с полётным контроллером</a>
+        
+        <button class="collapse-toggle" aria-label="Развернуть/свернуть" aria-expanded="false">
+            <svg class="collapse-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M6 12l4-4-4-4"/>
+            </svg>
+        </button>
+        
+    </div>
+    
+    <ul class="nav-children">
+        <li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/qgc-wifi.md" class="nav-link">Подключение к QGroundControl</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/transmitter-bind.md" class="nav-link">Настройка аппаратуры управления</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/flight-controller-setup.md" class="nav-link">Настройка полётного контроллера</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/params-upload.md" class="nav-link">Загрузка параметров</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/sensor-calibration.md" class="nav-link">Калибровка датчиков</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/imu-drift-check.md" class="nav-link">Дрон уходит в сторону на взлёте: проверка IMU</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/transmitter-calibration.md" class="nav-link">Калибровка аппаратуры управления</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/battery-settings.md" class="nav-link">Настройка питания</a>
+        
+    </div>
+    
+</li>
+    </ul>
+    
+</li><li class="nav-item has-children">
+    <div class="nav-item-header">
+        <a href="/render/manual-flight.md" class="nav-link">Пилотирование</a>
+        
+        <button class="collapse-toggle" aria-label="Развернуть/свернуть" aria-expanded="false">
+            <svg class="collapse-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M6 12l4-4-4-4"/>
+            </svg>
+        </button>
+        
+    </div>
+    
+    <ul class="nav-children">
+        <li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/manual-flight-sim.md" class="nav-link">Симулятор</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/first-flight.md" class="nav-link">Режим POSITION</a>
+        
+    </div>
+    
+</li>
+    </ul>
+    
+</li><li class="nav-item has-children">
+    <div class="nav-item-header">
+        <a href="/render/onboard-computer.md" class="nav-link">Взаимодействие с бортовым компьютером</a>
+        
+        <button class="collapse-toggle" aria-label="Развернуть/свернуть" aria-expanded="false">
+            <svg class="collapse-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M6 12l4-4-4-4"/>
+            </svg>
+        </button>
+        
+    </div>
+    
+    <ul class="nav-children">
+        <li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/os-image-flash.md" class="nav-link">Установка образа</a>
+        
+    </div>
+    
+</li><li class="nav-item has-children">
+    <div class="nav-item-header">
+        <a href="/render/os-image-setup.md" class="nav-link">Настройка образа</a>
+        
+        <button class="collapse-toggle" aria-label="Развернуть/свернуть" aria-expanded="false">
+            <svg class="collapse-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M6 12l4-4-4-4"/>
+            </svg>
+        </button>
+        
+    </div>
+    
+    <ul class="nav-children">
+        <li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/aruco-field.md" class="nav-link">Работа с полем ArUco-маркеров</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/camera-focus.md" class="nav-link">Настройка камеры</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/main-launch.md" class="nav-link">Запуск системы</a>
+        
+    </div>
+    
+</li>
+    </ul>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/web-interface.md" class="nav-link">Веб-интерфейс</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/preflight-check.md" class="nav-link">Проверка перед полётом</a>
+        
+    </div>
+    
+</li>
+    </ul>
+    
+</li><li class="nav-item has-children">
+    <div class="nav-item-header">
+        <a href="/render/offboard-commands.md" class="nav-link">Программирование</a>
+        
+        <button class="collapse-toggle" aria-label="Развернуть/свернуть" aria-expanded="false">
+            <svg class="collapse-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M6 12l4-4-4-4"/>
+            </svg>
+        </button>
+        
+    </div>
+    
+    <ul class="nav-children">
+        <li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/coordinate-frames.md" class="nav-link">Системы координат</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/offboard-node.md" class="nav-link">Нода offboard_control</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/ros2-basics.md" class="nav-link">ROS 2</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/code-snippets.md" class="nav-link">Примеры кода</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/opencv.md" class="nav-link">Компьютерное зрение</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/block-programming.md" class="nav-link">Блочное программирование</a>
+        
+    </div>
+    
+</li><li class="nav-item has-children">
+    <div class="nav-item-header">
+        <a href="/render/peripherals.md" class="nav-link">Работа с периферией</a>
+        
+        <button class="collapse-toggle" aria-label="Развернуть/свернуть" aria-expanded="false">
+            <svg class="collapse-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M6 12l4-4-4-4"/>
+            </svg>
+        </button>
+        
+    </div>
+    
+    <ul class="nav-children">
+        <li class="nav-item has-children">
+    <div class="nav-item-header">
+        <a href="/render/gpio.md" class="nav-link">Работа с GPIO</a>
+        
+        <button class="collapse-toggle" aria-label="Развернуть/свернуть" aria-expanded="false">
+            <svg class="collapse-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M6 12l4-4-4-4"/>
+            </svg>
+        </button>
+        
+    </div>
+    
+    <ul class="nav-children">
+        <li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/gpio-devices.md" class="nav-link">Подключение внешних устройств к Raspberry Pi</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/servo-hardware.md" class="nav-link">Подключение сервоприводов</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/servo-control.md" class="nav-link">Управление сервоприводами</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/magnet.md" class="nav-link">Подключение электромагнита</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/sensor-vl53l1x.md" class="nav-link">Использование лазерных дальномеров VL53L1X</a>
+        
+    </div>
+    
+</li>
+    </ul>
+    
+</li><li class="nav-item has-children">
+    <div class="nav-item-header">
+        <a href="/render/arduino-serial.md" class="nav-link">Подключение Arduino через serial_bridge</a>
+        
+        <button class="collapse-toggle" aria-label="Развернуть/свернуть" aria-expanded="false">
+            <svg class="collapse-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M6 12l4-4-4-4"/>
+            </svg>
+        </button>
+        
+    </div>
+    
+    <ul class="nav-children">
+        <li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/arduino-rosserial.md" class="nav-link">rosserial_ros2</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/arduino-rosserial-tutorial.md" class="nav-link">Примеры работы с Arduino</a>
+        
+    </div>
+    
+</li>
+    </ul>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/led-strip.md" class="nav-link">Работа со светодиодной лентой</a>
+        
+    </div>
+    
+</li><li class="nav-item has-children">
+    <div class="nav-item-header">
+        <a href="/render/camera.md" class="nav-link">Работа с камерой</a>
+        
+        <button class="collapse-toggle" aria-label="Развернуть/свернуть" aria-expanded="false">
+            <svg class="collapse-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M6 12l4-4-4-4"/>
+            </svg>
+        </button>
+        
+    </div>
+    
+    <ul class="nav-children">
+        <li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/camera-calibration.md" class="nav-link">Калибровка камеры</a>
+        
+    </div>
+    
+</li>
+    </ul>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/lidar-ld19.md" class="nav-link">Работа с 2d лидаром</a>
+        
+    </div>
+    
+</li>
+    </ul>
+    
+</li>
+    </ul>
+    
+</li><li class="nav-item has-children">
+    <div class="nav-item-header">
+        <a href="/render/knowledge_base/index-kb.md" class="nav-link">База знаний</a>
+        
+        <button class="collapse-toggle" aria-label="Развернуть/свернуть" aria-expanded="false">
+            <svg class="collapse-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M6 12l4-4-4-4"/>
+            </svg>
+        </button>
+        
+    </div>
+    
+    <ul class="nav-children">
+        <li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/knowledge_base/battery-li-po.md" class="nav-link">Аккумуляторные батареи</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/knowledge_base/simulation.md" class="nav-link">Симулятор</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/knowledge_base/transmitter-voice.md" class="nav-link">Русская озвучка RadioMaster Pocket</a>
+        
+    </div>
+    
+</li><li class="nav-item has-children">
+    <div class="nav-item-header">
+        <a href="/render/knowledge_base/qgc-basics.md" class="nav-link">Работа с QGC</a>
+        
+        <button class="collapse-toggle" aria-label="Развернуть/свернуть" aria-expanded="false">
+            <svg class="collapse-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M6 12l4-4-4-4"/>
+            </svg>
+        </button>
+        
+    </div>
+    
+    <ul class="nav-children">
+        <li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/knowledge_base/qgc-usb.md" class="nav-link">Подключение к QGC по проводу</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/knowledge_base/px4-firmware.md" class="nav-link">Прошивка</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/knowledge_base/esc-calibration.md" class="nav-link">Калибровка ESC</a>
+        
+    </div>
+    
+</li>
+    </ul>
+    
+</li><li class="nav-item has-children">
+    <div class="nav-item-header">
+        <a href="/render/knowledge_base/boards-overview.md" class="nav-link">Бортовые компьютеры</a>
+        
+        <button class="collapse-toggle" aria-label="Развернуть/свернуть" aria-expanded="false">
+            <svg class="collapse-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M6 12l4-4-4-4"/>
+            </svg>
+        </button>
+        
+    </div>
+    
+    <ul class="nav-children">
+        <li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/knowledge_base/board-rpi-cm5.md" class="nav-link">Raspberry Pi CM5</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/knowledge_base/board-radxa-cm5.md" class="nav-link">Radxa CM5</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/knowledge_base/board-opi-zero3w.md" class="nav-link">Orange Pi Zero 3W</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/knowledge_base/board-opi-5pro.md" class="nav-link">Orange Pi 5 Pro</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/knowledge_base/board-rdk-x3.md" class="nav-link">RDK X3</a>
+        
+    </div>
+    
+</li>
+    </ul>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/knowledge_base/aruco-navigation.md" class="nav-link">Навигация по ArUco</a>
+        
+    </div>
+    
+</li><li class="nav-item has-children">
+    <div class="nav-item-header">
+        <a href="/render/knowledge_base/index-kb.md#устройство-обрика-техническая-база" class="nav-link">Устройство Обрика: техническая база</a>
+        
+        <button class="collapse-toggle" aria-label="Развернуть/свернуть" aria-expanded="false">
+            <svg class="collapse-icon" width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M6 12l4-4-4-4"/>
+            </svg>
+        </button>
+        
+    </div>
+    
+    <ul class="nav-children">
+        <li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/knowledge_base/docker_architecture.md" class="nav-link">Как устроен Docker</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/knowledge_base/ros2-raw.md" class="nav-link">Как работает ROS 2</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/knowledge_base/gpio-raw.md" class="nav-link">Как работает GPIO</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/knowledge_base/devices-raw.md" class="nav-link">Устройства /dev</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/knowledge_base/camera-raw.md" class="nav-link">Как работает камера</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/knowledge_base/servo-magnet-raw.md" class="nav-link">Как работают серво и магнит</a>
+        
+    </div>
+    
+</li><li class="nav-item">
+    <div class="nav-item-header">
+        <a href="/render/knowledge_base/arduino-raw.md" class="nav-link">Как подключается Arduino</a>
+        
+    </div>
+    
+</li>
+    </ul>
+    
+</li>
+    </ul>
+    
+</li>
+            </nav>
+        </aside>
+        
+        <main class="content">
+            <div class="content-wrapper">
+                <article class="book">
+                    <h1>Программирование автономных полётов<span aria-hidden="true" id="L1"></span></h1>
+<p><span aria-hidden="true" id="L2"></span><br/>
+Здесь собраны все команды, которые вы можете отправить дрону из Python-программы. Одна библиотека — <code>sverk_interfaces</code> — берёт на себя всю сложную работу: запуск ROS 2 ноды, подключение к сервисам, пересчёт координат. Вам достаточно двух строк, чтобы поднять дрон в воздух.<span aria-hidden="true" id="L3"></span><br/>
+<span aria-hidden="true" id="L4"></span></p>
+<hr/>
+<p><span aria-hidden="true" id="L6"></span></p>
+<h2>Быстрый старт<span aria-hidden="true" id="L7"></span></h2>
+<p><span aria-hidden="true" id="L8"></span></p>
+<h3>Взлёт и посадка за 10 строк<span aria-hidden="true" id="L9"></span></h3>
+<p><span aria-hidden="true" id="L10"></span><br/>
+<strong>Что мы делаем:</strong> дрон взлетает на 1.5 метра и через 5 секунд садится.<span aria-hidden="true" id="L11"></span><br/>
+<span aria-hidden="true" id="L12"></span><br/>
+<span aria-hidden="true" id="L14"></span> <span aria-hidden="true" id="L15"></span> <span aria-hidden="true" id="L16"></span> <span aria-hidden="true" id="L17"></span> <span aria-hidden="true" id="L18"></span> <span aria-hidden="true" id="L19"></span> <span aria-hidden="true" id="L20"></span> <span aria-hidden="true" id="L21"></span> <span aria-hidden="true" id="L22"></span> <span aria-hidden="true" id="L23"></span> <span aria-hidden="true" id="L24"></span> <span aria-hidden="true" id="L25"></span> <span aria-hidden="true" id="L26"></span> <span aria-hidden="true" id="L27"></span> <span aria-hidden="true" id="L28"></span> <span aria-hidden="true" id="L29"></span> <span aria-hidden="true" id="L30"></span> <span aria-hidden="true" id="L31"></span> <span aria-hidden="true" id="L32"></span> <span aria-hidden="true" id="L33"></span> <span aria-hidden="true" id="L34"></span> <span aria-hidden="true" id="L35"></span></p>
+<div class="codehilite"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">time</span>                            <span class="c1"># стандартная библиотека для паузы</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">sverk_interfaces</span>                <span class="c1"># библиотека управления Обриком</span>
+
+<span class="c1"># создаём объект drone — он запускает ROS 2 ноду внутри</span>
+<span class="n">drone</span> <span class="o">=</span> <span class="n">sverk_interfaces</span><span class="o">.</span><span class="n">init</span><span class="p">(</span><span class="n">Nodename</span><span class="o">=</span><span class="s2">"my_first_flight"</span><span class="p">)</span>
+
+<span class="c1"># navigate отправляет дрон в точку (x=0, y=0, z=1.5) — это 1.5 м вверх</span>
+<span class="c1"># frame_id='body' означает «относительно корпуса», auto_arm=True — взлетайте сам</span>
+<span class="n">resp</span> <span class="o">=</span> <span class="n">drone</span><span class="o">.</span><span class="n">control</span><span class="o">.</span><span class="n">navigate</span><span class="p">(</span>
+    <span class="n">x</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">y</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">z</span><span class="o">=</span><span class="mf">1.5</span><span class="p">,</span>
+    <span class="n">yaw</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">speed</span><span class="o">=</span><span class="mf">1.0</span><span class="p">,</span>
+    <span class="n">frame_id</span><span class="o">=</span><span class="s2">"body"</span><span class="p">,</span>
+    <span class="n">auto_arm</span><span class="o">=</span><span class="kc">True</span>
+<span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="s2">"Взлёт:"</span><span class="p">,</span> <span class="n">resp</span><span class="o">.</span><span class="n">success</span><span class="p">,</span> <span class="n">resp</span><span class="o">.</span><span class="n">message</span><span class="p">)</span>  <span class="c1"># True или False + сообщение</span>
+
+<span class="n">time</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="mf">5.0</span><span class="p">)</span>                        <span class="c1"># ждём 5 секунд в воздухе</span>
+
+<span class="n">land_resp</span> <span class="o">=</span> <span class="n">drone</span><span class="o">.</span><span class="n">control</span><span class="o">.</span><span class="n">land</span><span class="p">()</span>      <span class="c1"># команда посадки</span>
+<span class="nb">print</span><span class="p">(</span><span class="s2">"Посадка:"</span><span class="p">,</span> <span class="n">land_resp</span><span class="o">.</span><span class="n">success</span><span class="p">)</span>
+
+<span class="n">drone</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>                          <span class="c1"># освобождаем ресурсы</span>
+</code></pre></div>
+<p><span aria-hidden="true" id="L37"></span><br/>
+Команда <code>navigate</code> отправляется мгновенно и программа продолжает работу. Дрон летит в фоне, пока вы делаете что-то ещё. Если хотите дождаться прилёта — используйте <code>navigate_wait</code>.<span aria-hidden="true" id="L38"></span><br/>
+<span aria-hidden="true" id="L39"></span></p>
+<hr/>
+<p><span aria-hidden="true" id="L41"></span></p>
+<h2>Все команды drone.control<span aria-hidden="true" id="L42"></span></h2>
+<p><span aria-hidden="true" id="L43"></span></p>
+<h3>navigate — полёт в точку<span aria-hidden="true" id="L44"></span></h3>
+<p><span aria-hidden="true" id="L45"></span><br/>
+Базовая команда. Отправляет дрон к нужным координатам и сразу возвращает управление программе.<span aria-hidden="true" id="L46"></span><br/>
+<span aria-hidden="true" id="L47"></span><br/>
+<span aria-hidden="true" id="L48"></span> <span aria-hidden="true" id="L49"></span> <span aria-hidden="true" id="L50"></span> <span aria-hidden="true" id="L51"></span> <span aria-hidden="true" id="L52"></span> <span aria-hidden="true" id="L53"></span> <span aria-hidden="true" id="L54"></span></p>
+<table>
+<thead>
+<tr>
+<th>Параметр</th>
+<th>Тип</th>
+<th>По умолчанию</th>
+<th>Описание</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>x</code>, <code>y</code>, <code>z</code></td>
+<td>float</td>
+<td>обязательно</td>
+<td>Координаты цели в метрах</td>
+</tr>
+<tr>
+<td><code>yaw</code></td>
+<td>float</td>
+<td>0.0</td>
+<td>Целевой курс в радианах</td>
+</tr>
+<tr>
+<td><code>speed</code></td>
+<td>float</td>
+<td>0.5</td>
+<td>Скорость полёта в м/с</td>
+</tr>
+<tr>
+<td><code>frame_id</code></td>
+<td>str</td>
+<td><code>'map'</code></td>
+<td>Система координат: <code>'body'</code>, <code>'map'</code>, <code>'aruco_map'</code></td>
+</tr>
+<tr>
+<td><code>auto_arm</code></td>
+<td>bool</td>
+<td>False</td>
+<td>Если True, сам включит моторы и поднимется</td>
+</tr>
+</tbody>
+</table>
+<p><span aria-hidden="true" id="L55"></span><br/>
+!!! Формулировка для auto_arm не совсем правильная без True моторы просто не запустятся и если до этого они не были включены дрон будет стоять на месте в дальнейшем нет необходмости выставлять True !!!<span aria-hidden="true" id="L56"></span><br/>
+<span aria-hidden="true" id="L57"></span><br/>
+<span aria-hidden="true" id="L59"></span> <span aria-hidden="true" id="L60"></span></p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># полёт на 1 метр вперёд относительно корпуса, сохраняя курс</span>
+<span class="n">drone</span><span class="o">.</span><span class="n">control</span><span class="o">.</span><span class="n">navigate</span><span class="p">(</span><span class="n">x</span><span class="o">=</span><span class="mf">1.0</span><span class="p">,</span> <span class="n">y</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">z</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">yaw</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">speed</span><span class="o">=</span><span class="mf">0.5</span><span class="p">,</span> <span class="n">frame_id</span><span class="o">=</span><span class="s2">"body"</span><span class="p">)</span>
+</code></pre></div>
+<p><span aria-hidden="true" id="L62"></span></p>
+<hr/>
+<p><span aria-hidden="true" id="L64"></span></p>
+<h3>navigate_wait — полёт в точку с ожиданием прилёта<span aria-hidden="true" id="L65"></span></h3>
+<p><span aria-hidden="true" id="L66"></span><br/>
+Как <code>navigate</code>, но программа ждёт, пока дрон не окажется в нужной точке с<span aria-hidden="true" id="L67"></span><br/>
+заданной точностью. Реализован через action <code>/navigate_to</code>: прибытие<span aria-hidden="true" id="L68"></span><br/>
+отслеживает сама нода <code>offboard_control</code> (без опроса телеметрии из Python).<span aria-hidden="true" id="L69"></span><br/>
+Если дрон физически не долетел за <code>timeout</code> секунд — нода паркует его в hold,<span aria-hidden="true" id="L70"></span><br/>
+а вызов бросает <code>TimeoutError</code>.<span aria-hidden="true" id="L71"></span><br/>
+<span aria-hidden="true" id="L72"></span><br/>
+<span aria-hidden="true" id="L73"></span> <span aria-hidden="true" id="L74"></span> <span aria-hidden="true" id="L75"></span> <span aria-hidden="true" id="L76"></span> <span aria-hidden="true" id="L77"></span></p>
+<table>
+<thead>
+<tr>
+<th>Параметр</th>
+<th>Тип</th>
+<th>По умолчанию</th>
+<th>Описание</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>tolerance</code></td>
+<td>float</td>
+<td>0.2</td>
+<td>Допустимое расстояние до цели (м)</td>
+</tr>
+<tr>
+<td><code>timeout</code></td>
+<td>float</td>
+<td>60.0</td>
+<td>Максимальное время полёта (с); по истечении — hold + TimeoutError</td>
+</tr>
+<tr>
+<td><code>check_interval</code></td>
+<td>float</td>
+<td>—</td>
+<td>Устарел, игнорируется (прибытие отслеживает нода)</td>
+</tr>
+</tbody>
+</table>
+<p><span aria-hidden="true" id="L78"></span><br/>
+<span aria-hidden="true" id="L80"></span> <span aria-hidden="true" id="L81"></span> <span aria-hidden="true" id="L82"></span> <span aria-hidden="true" id="L83"></span> <span aria-hidden="true" id="L84"></span> <span aria-hidden="true" id="L85"></span> <span aria-hidden="true" id="L86"></span> <span aria-hidden="true" id="L87"></span> <span aria-hidden="true" id="L88"></span></p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># взлёт и ожидание, пока дрон не окажется в 0.25 м от цели</span>
+<span class="n">drone</span><span class="o">.</span><span class="n">control</span><span class="o">.</span><span class="n">navigate_wait</span><span class="p">(</span>
+    <span class="n">x</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">y</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">z</span><span class="o">=</span><span class="mf">1.5</span><span class="p">,</span>
+    <span class="n">frame_id</span><span class="o">=</span><span class="s2">"body"</span><span class="p">,</span>
+    <span class="n">auto_arm</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+    <span class="n">tolerance</span><span class="o">=</span><span class="mf">0.25</span><span class="p">,</span>
+    <span class="n">timeout</span><span class="o">=</span><span class="mf">30.0</span>
+<span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="s2">"Дрон прилетел!"</span><span class="p">)</span>
+</code></pre></div>
+<p><span aria-hidden="true" id="L90"></span></p>
+<hr/>
+<p><span aria-hidden="true" id="L92"></span></p>
+<h3>land — посадка<span aria-hidden="true" id="L93"></span></h3>
+<p><span aria-hidden="true" id="L94"></span><br/>
+Переводит дрон в режим автоматической посадки (PX4 AUTO.LAND).<span aria-hidden="true" id="L95"></span><br/>
+<span aria-hidden="true" id="L96"></span><br/>
+<span aria-hidden="true" id="L98"></span></p>
+<div class="codehilite"><pre><span></span><code><span class="n">drone</span><span class="o">.</span><span class="n">control</span><span class="o">.</span><span class="n">land</span><span class="p">()</span>
+</code></pre></div>
+<p><span aria-hidden="true" id="L100"></span></p>
+<hr/>
+<p><span aria-hidden="true" id="L102"></span></p>
+<h3>get_telemetry — узнать, где дрон и что с ним<span aria-hidden="true" id="L103"></span></h3>
+<p><span aria-hidden="true" id="L104"></span><br/>
+Возвращает текущее состояние дрона: координаты, скорость, заряд батареи, режим.<span aria-hidden="true" id="L105"></span><br/>
+<span aria-hidden="true" id="L106"></span><br/>
+<span aria-hidden="true" id="L108"></span> <span aria-hidden="true" id="L109"></span> <span aria-hidden="true" id="L110"></span> <span aria-hidden="true" id="L111"></span> <span aria-hidden="true" id="L112"></span> <span aria-hidden="true" id="L113"></span> <span aria-hidden="true" id="L114"></span> <span aria-hidden="true" id="L115"></span> <span aria-hidden="true" id="L116"></span></p>
+<div class="codehilite"><pre><span></span><code><span class="n">t</span> <span class="o">=</span> <span class="n">drone</span><span class="o">.</span><span class="n">control</span><span class="o">.</span><span class="n">get_telemetry</span><span class="p">(</span><span class="n">frame_id</span><span class="o">=</span><span class="s2">"map"</span><span class="p">)</span>
+
+<span class="nb">print</span><span class="p">(</span><span class="s2">"Подключён:"</span><span class="p">,</span> <span class="n">t</span><span class="o">.</span><span class="n">connected</span><span class="p">)</span>       <span class="c1"># True/False</span>
+<span class="nb">print</span><span class="p">(</span><span class="s2">"Заармирован:"</span><span class="p">,</span> <span class="n">t</span><span class="o">.</span><span class="n">armed</span><span class="p">)</span>         <span class="c1"># True = моторы включены</span>
+<span class="nb">print</span><span class="p">(</span><span class="s2">"Режим:"</span><span class="p">,</span> <span class="n">t</span><span class="o">.</span><span class="n">mode</span><span class="p">)</span>                <span class="c1"># OFFBOARD, POSITION, LAND...</span>
+<span class="nb">print</span><span class="p">(</span><span class="s2">"Позиция:"</span><span class="p">,</span> <span class="n">t</span><span class="o">.</span><span class="n">x</span><span class="p">,</span> <span class="n">t</span><span class="o">.</span><span class="n">y</span><span class="p">,</span> <span class="n">t</span><span class="o">.</span><span class="n">z</span><span class="p">)</span>      <span class="c1"># метры в системе map</span>
+<span class="nb">print</span><span class="p">(</span><span class="s2">"Скорость:"</span><span class="p">,</span> <span class="n">t</span><span class="o">.</span><span class="n">vx</span><span class="p">,</span> <span class="n">t</span><span class="o">.</span><span class="n">vy</span><span class="p">,</span> <span class="n">t</span><span class="o">.</span><span class="n">vz</span><span class="p">)</span>  <span class="c1"># м/с</span>
+<span class="nb">print</span><span class="p">(</span><span class="s2">"Батарея:"</span><span class="p">,</span> <span class="n">t</span><span class="o">.</span><span class="n">voltage</span><span class="p">,</span> <span class="s2">"В"</span><span class="p">)</span>      <span class="c1"># напряжение</span>
+<span class="nb">print</span><span class="p">(</span><span class="s2">"GPS:"</span><span class="p">,</span> <span class="n">t</span><span class="o">.</span><span class="n">lat</span><span class="p">,</span> <span class="n">t</span><span class="o">.</span><span class="n">lon</span><span class="p">,</span> <span class="n">t</span><span class="o">.</span><span class="n">alt</span><span class="p">)</span>     <span class="c1"># широта, долгота, высота</span>
+</code></pre></div>
+<p><span aria-hidden="true" id="L118"></span><br/>
+!!! Необходимо пояснение по входному frame_id, что отнисельно выбранного будут выводится данные и тд !!!<span aria-hidden="true" id="L119"></span><br/>
+<span aria-hidden="true" id="L120"></span></p>
+<hr/>
+<p><span aria-hidden="true" id="L122"></span></p>
+<h3>set_altitude — сменить высоту, не меняя курс и положение по X, Y<span aria-hidden="true" id="L123"></span></h3>
+<p><span aria-hidden="true" id="L124"></span><br/>
+Удобно, когда нужно просто подняться или спуститься во время полёта.<span aria-hidden="true" id="L125"></span><br/>
+<span aria-hidden="true" id="L126"></span><br/>
+<span aria-hidden="true" id="L128"></span> <span aria-hidden="true" id="L129"></span> <span aria-hidden="true" id="L130"></span> <span aria-hidden="true" id="L131"></span> <span aria-hidden="true" id="L132"></span></p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># подняться до 2 м над землёй (terrain = относительно поверхности)</span>
+<span class="n">drone</span><span class="o">.</span><span class="n">control</span><span class="o">.</span><span class="n">set_altitude</span><span class="p">(</span><span class="n">z</span><span class="o">=</span><span class="mf">2.0</span><span class="p">,</span> <span class="n">frame_id</span><span class="o">=</span><span class="s2">"terrain"</span><span class="p">)</span>
+
+<span class="c1"># опуститься до 1 м в мировой системе координат</span>
+<span class="n">drone</span><span class="o">.</span><span class="n">control</span><span class="o">.</span><span class="n">set_altitude</span><span class="p">(</span><span class="n">z</span><span class="o">=</span><span class="mf">1.0</span><span class="p">,</span> <span class="n">frame_id</span><span class="o">=</span><span class="s2">"map"</span><span class="p">)</span>
+</code></pre></div>
+<p><span aria-hidden="true" id="L134"></span></p>
+<hr/>
+<p><span aria-hidden="true" id="L136"></span></p>
+<h3>set_yaw — повернуться на угол<span aria-hidden="true" id="L137"></span></h3>
+<p><span aria-hidden="true" id="L138"></span><br/>
+Поворот вокруг вертикальной оси без смены позиции.<span aria-hidden="true" id="L139"></span><br/>
+<span aria-hidden="true" id="L140"></span><br/>
+<span aria-hidden="true" id="L142"></span> <span aria-hidden="true" id="L143"></span> <span aria-hidden="true" id="L144"></span> <span aria-hidden="true" id="L145"></span> <span aria-hidden="true" id="L146"></span> <span aria-hidden="true" id="L147"></span> <span aria-hidden="true" id="L148"></span></p>
+<div class="codehilite"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">math</span>
+
+<span class="c1"># повернуться на 90 градусов по часовой (отрицательное = по часовой)</span>
+<span class="n">drone</span><span class="o">.</span><span class="n">control</span><span class="o">.</span><span class="n">set_yaw</span><span class="p">(</span><span class="n">yaw</span><span class="o">=-</span><span class="n">math</span><span class="o">.</span><span class="n">pi</span> <span class="o">/</span> <span class="mi">2</span><span class="p">,</span> <span class="n">frame_id</span><span class="o">=</span><span class="s2">"body"</span><span class="p">)</span>
+
+<span class="c1"># сбросить ручное управление курсом</span>
+<span class="n">drone</span><span class="o">.</span><span class="n">control</span><span class="o">.</span><span class="n">clear_yaw_override</span><span class="p">()</span>
+</code></pre></div>
+<p><span aria-hidden="true" id="L150"></span></p>
+<hr/>
+<p><span aria-hidden="true" id="L152"></span></p>
+<h3>set_yaw_rate — вращаться с постоянной скоростью<span aria-hidden="true" id="L153"></span></h3>
+<p><span aria-hidden="true" id="L154"></span><br/>
+Дрон вращается вокруг вертикальной оси до следующей команды.<span aria-hidden="true" id="L155"></span><br/>
+<span aria-hidden="true" id="L156"></span><br/>
+<span aria-hidden="true" id="L158"></span> <span aria-hidden="true" id="L159"></span> <span aria-hidden="true" id="L160"></span> <span aria-hidden="true" id="L161"></span> <span aria-hidden="true" id="L162"></span></p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># вращение 0.5 рад/с против часовой стрелки (вид сверху)</span>
+<span class="n">drone</span><span class="o">.</span><span class="n">control</span><span class="o">.</span><span class="n">set_yaw_rate</span><span class="p">(</span><span class="n">yaw_rate</span><span class="o">=</span><span class="mf">0.5</span><span class="p">)</span>
+
+<span class="c1"># остановить вращение — сбросить override</span>
+<span class="n">drone</span><span class="o">.</span><span class="n">control</span><span class="o">.</span><span class="n">clear_yaw_override</span><span class="p">()</span>
+</code></pre></div>
+<p><span aria-hidden="true" id="L164"></span></p>
+<hr/>
+<p><span aria-hidden="true" id="L166"></span></p>
+<h3>set_position — задать точку для удержания (низкоуровневое)<span aria-hidden="true" id="L167"></span></h3>
+<p><span aria-hidden="true" id="L168"></span><br/>
+Используется для частого обновления цели, например при полёте по кругу. Нода <code>offboard_control</code> сразу начинает лететь к этой точке.<span aria-hidden="true" id="L169"></span><br/>
+<span aria-hidden="true" id="L170"></span><br/>
+<span aria-hidden="true" id="L172"></span> <span aria-hidden="true" id="L173"></span> <span aria-hidden="true" id="L174"></span> <span aria-hidden="true" id="L175"></span> <span aria-hidden="true" id="L176"></span> <span aria-hidden="true" id="L177"></span> <span aria-hidden="true" id="L178"></span> <span aria-hidden="true" id="L179"></span> <span aria-hidden="true" id="L180"></span> <span aria-hidden="true" id="L181"></span> <span aria-hidden="true" id="L182"></span></p>
+<div class="codehilite"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">math</span><span class="o">,</span><span class="w"> </span><span class="nn">time</span>
+
+<span class="c1"># полёт по кругу: каждые 0.1 с обновляем цель</span>
+<span class="n">start</span> <span class="o">=</span> <span class="n">drone</span><span class="o">.</span><span class="n">control</span><span class="o">.</span><span class="n">get_telemetry</span><span class="p">(</span><span class="n">frame_id</span><span class="o">=</span><span class="s2">"map"</span><span class="p">)</span>
+<span class="n">radius</span> <span class="o">=</span> <span class="mf">0.6</span>
+<span class="k">for</span> <span class="n">i</span> <span class="ow">in</span> <span class="nb">range</span><span class="p">(</span><span class="mi">200</span><span class="p">):</span>
+    <span class="n">angle</span> <span class="o">=</span> <span class="n">i</span> <span class="o">*</span> <span class="mf">0.1</span> <span class="o">*</span> <span class="mf">0.3</span>          <span class="c1"># угол меняется 0.3 рад/с</span>
+    <span class="n">x</span> <span class="o">=</span> <span class="n">start</span><span class="o">.</span><span class="n">x</span> <span class="o">+</span> <span class="n">math</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="n">angle</span><span class="p">)</span> <span class="o">*</span> <span class="n">radius</span>
+    <span class="n">y</span> <span class="o">=</span> <span class="n">start</span><span class="o">.</span><span class="n">y</span> <span class="o">+</span> <span class="n">math</span><span class="o">.</span><span class="n">cos</span><span class="p">(</span><span class="n">angle</span><span class="p">)</span> <span class="o">*</span> <span class="n">radius</span>
+    <span class="n">drone</span><span class="o">.</span><span class="n">control</span><span class="o">.</span><span class="n">set_position</span><span class="p">(</span><span class="n">x</span><span class="o">=</span><span class="n">x</span><span class="p">,</span> <span class="n">y</span><span class="o">=</span><span class="n">y</span><span class="p">,</span> <span class="n">z</span><span class="o">=</span><span class="n">start</span><span class="o">.</span><span class="n">z</span><span class="p">,</span> <span class="n">yaw</span><span class="o">=</span><span class="n">start</span><span class="o">.</span><span class="n">yaw</span><span class="p">,</span> <span class="n">frame_id</span><span class="o">=</span><span class="s2">"map"</span><span class="p">)</span>
+    <span class="n">time</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="mf">0.1</span><span class="p">)</span>
+</code></pre></div>
+<p><span aria-hidden="true" id="L184"></span></p>
+<hr/>
+<p><span aria-hidden="true" id="L186"></span></p>
+<h3>set_velocity — управление по скорости<span aria-hidden="true" id="L187"></span></h3>
+<p><span aria-hidden="true" id="L188"></span><br/>
+Дрон летит с заданной скоростью по осям, пока не получит новую команду.<span aria-hidden="true" id="L189"></span><br/>
+<span aria-hidden="true" id="L190"></span><br/>
+<span aria-hidden="true" id="L192"></span> <span aria-hidden="true" id="L193"></span></p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># лететь вперёд 1 м/с по оси корпуса</span>
+<span class="n">drone</span><span class="o">.</span><span class="n">control</span><span class="o">.</span><span class="n">set_velocity</span><span class="p">(</span><span class="n">vx</span><span class="o">=</span><span class="mf">1.0</span><span class="p">,</span> <span class="n">vy</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">vz</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">yaw</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">frame_id</span><span class="o">=</span><span class="s2">"body"</span><span class="p">)</span>
+</code></pre></div>
+<p><span aria-hidden="true" id="L195"></span><br/>
+!!! Описание входных vx vy и vz на всякий в чем минимальные максимальные и рекомендуемые значения !!!<span aria-hidden="true" id="L196"></span><br/>
+<span aria-hidden="true" id="L197"></span></p>
+<hr/>
+<p><span aria-hidden="true" id="L199"></span></p>
+<h3>set_trajectory — единый setpoint (точка + скорость + ускорение)<span aria-hidden="true" id="L200"></span></h3>
+<p><span aria-hidden="true" id="L201"></span><br/>
+Единый «траекторный» setpoint для упрощённого обхода препятствий: одним вызовом можно задать целевую <strong>точку</strong> И/ИЛИ вектор <strong>скорости</strong> И/ИЛИ <strong>ускорения</strong> (плюс <code>yaw</code>/<code>yaw_rate</code>). Смысл — держать целевую точку и одновременно подмешивать вектор скорости/ускорения для ухода от препятствия.<span aria-hidden="true" id="L202"></span><br/>
+<span aria-hidden="true" id="L203"></span><br/>
+Правило групп: каждая тройка (позиция <code>x y z</code>, скорость <code>vx vy vz</code>, ускорение <code>ax ay az</code>) — либо <strong>все</strong> поля заданы, либо <strong>все</strong> не заданы (в Python — просто не передавай их, тогда группа выключена). Хотя бы одна группа должна быть задана.<span aria-hidden="true" id="L204"></span><br/>
+<span aria-hidden="true" id="L205"></span><br/>
+<span aria-hidden="true" id="L207"></span> <span aria-hidden="true" id="L208"></span> <span aria-hidden="true" id="L209"></span></p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># держать точку и подмешать боковое ускорение (уход вбок)</span>
+<span class="n">drone</span><span class="o">.</span><span class="n">control</span><span class="o">.</span><span class="n">set_trajectory</span><span class="p">(</span><span class="n">x</span><span class="o">=</span><span class="mf">2.0</span><span class="p">,</span> <span class="n">y</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">z</span><span class="o">=</span><span class="mf">1.5</span><span class="p">,</span> <span class="n">ax</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">ay</span><span class="o">=</span><span class="mf">1.0</span><span class="p">,</span> <span class="n">az</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span>
+                             <span class="n">yaw</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">frame_id</span><span class="o">=</span><span class="s2">"map"</span><span class="p">,</span> <span class="n">auto_arm</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+</code></pre></div>
+<p><span aria-hidden="true" id="L211"></span><br/>
+Для <strong>динамического</strong> обхода препятствий есть высокочастотный поток-коррекция <code>publish_trajectory_correction(...)</code>: базу (точку) задаёшь один раз через <code>set_trajectory</code>, а быстро меняющийся feed-forward (скорость/ускорение/yaw_rate) шлёшь в цикле по топику — это быстрее и не блокирует, как повторные вызовы сервиса:<span aria-hidden="true" id="L212"></span><br/>
+<span aria-hidden="true" id="L213"></span><br/>
+<span aria-hidden="true" id="L215"></span> <span aria-hidden="true" id="L216"></span> <span aria-hidden="true" id="L217"></span> <span aria-hidden="true" id="L218"></span> <span aria-hidden="true" id="L219"></span> <span aria-hidden="true" id="L220"></span> <span aria-hidden="true" id="L221"></span> <span aria-hidden="true" id="L222"></span> <span aria-hidden="true" id="L223"></span> <span aria-hidden="true" id="L224"></span> <span aria-hidden="true" id="L225"></span></p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># базовая цель — один раз</span>
+<span class="n">drone</span><span class="o">.</span><span class="n">control</span><span class="o">.</span><span class="n">set_trajectory</span><span class="p">(</span><span class="n">x</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">y</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">z</span><span class="o">=</span><span class="mf">1.5</span><span class="p">,</span> <span class="n">yaw</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">auto_arm</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+
+<span class="c1"># коррекция — в цикле 50 Гц (например, из логики avoidance)</span>
+<span class="kn">import</span><span class="w"> </span><span class="nn">math</span><span class="o">,</span><span class="w"> </span><span class="nn">time</span>
+<span class="n">t0</span> <span class="o">=</span> <span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">()</span>
+<span class="k">while</span> <span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">()</span> <span class="o">-</span> <span class="n">t0</span> <span class="o">&lt;</span> <span class="mf">4.0</span><span class="p">:</span>
+    <span class="n">ay</span> <span class="o">=</span> <span class="mf">1.5</span> <span class="o">*</span> <span class="n">math</span><span class="o">.</span><span class="n">sin</span><span class="p">(</span><span class="n">math</span><span class="o">.</span><span class="n">pi</span> <span class="o">*</span> <span class="p">(</span><span class="n">time</span><span class="o">.</span><span class="n">time</span><span class="p">()</span> <span class="o">-</span> <span class="n">t0</span><span class="p">)</span> <span class="o">/</span> <span class="mf">4.0</span><span class="p">)</span>
+    <span class="n">drone</span><span class="o">.</span><span class="n">control</span><span class="o">.</span><span class="n">publish_trajectory_correction</span><span class="p">(</span><span class="n">ax</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">ay</span><span class="o">=</span><span class="n">ay</span><span class="p">,</span> <span class="n">az</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span>
+                                                <span class="n">frame_id</span><span class="o">=</span><span class="s2">"base_link"</span><span class="p">)</span>  <span class="c1"># в СК дрона</span>
+    <span class="n">time</span><span class="o">.</span><span class="n">sleep</span><span class="p">(</span><span class="mf">0.02</span><span class="p">)</span>
+</code></pre></div>
+<p><span aria-hidden="true" id="L227"></span><br/>
+Если поток коррекций замолчит дольше <code>correction_timeout</code> (по умолчанию 0.5 с), нода сама сбросит коррекцию и удержит базовую точку.<span aria-hidden="true" id="L228"></span><br/>
+<span aria-hidden="true" id="L229"></span><br/>
+📖 Подробное руководство по обоим инструментам, semantics групп/фреймов, безопасность и полный демо-скрипт — в <a href="dev/trajectory_setpoint.md">docs/dev/trajectory_setpoint.md</a>.<span aria-hidden="true" id="L230"></span><br/>
+<span aria-hidden="true" id="L231"></span></p>
+<hr/>
+<p><span aria-hidden="true" id="L233"></span></p>
+<h3>set_attitude — управление по углам (продвинутое)<span aria-hidden="true" id="L234"></span></h3>
+<p><span aria-hidden="true" id="L235"></span><br/>
+Аналог режима STABILIZED: вы задаёте углы наклона и газ.<span aria-hidden="true" id="L236"></span><br/>
+<span aria-hidden="true" id="L237"></span><br/>
+<span aria-hidden="true" id="L239"></span> <span aria-hidden="true" id="L240"></span> <span aria-hidden="true" id="L241"></span></p>
+<div class="codehilite"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">math</span>
+<span class="c1"># небольшой наклон вперёд + газ 0.5</span>
+<span class="n">drone</span><span class="o">.</span><span class="n">control</span><span class="o">.</span><span class="n">set_attitude</span><span class="p">(</span><span class="n">roll</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">pitch</span><span class="o">=</span><span class="mf">0.1</span><span class="p">,</span> <span class="n">yaw</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">thrust</span><span class="o">=</span><span class="mf">0.5</span><span class="p">,</span> <span class="n">frame_id</span><span class="o">=</span><span class="s2">"map"</span><span class="p">)</span>
+</code></pre></div>
+<p><span aria-hidden="true" id="L243"></span><br/>
+!!! Описание входных углов на всякий в чем минимальные максимальные и рекомендуемые значения !!!<span aria-hidden="true" id="L244"></span><br/>
+<span aria-hidden="true" id="L245"></span></p>
+<hr/>
+<p><span aria-hidden="true" id="L247"></span></p>
+<h3>set_rates — управление угловыми скоростями (самое низкоуровневое)<span aria-hidden="true" id="L248"></span></h3>
+<p><span aria-hidden="true" id="L249"></span><br/>
+Аналог режима ACRO. Задаёте скорости вращения по каждой оси и газ.<span aria-hidden="true" id="L250"></span><br/>
+<span aria-hidden="true" id="L251"></span><br/>
+<span aria-hidden="true" id="L253"></span> <span aria-hidden="true" id="L254"></span></p>
+<div class="codehilite"><pre><span></span><code><span class="c1"># вращение по крену 1 рад/с, газ 0.4</span>
+<span class="n">drone</span><span class="o">.</span><span class="n">control</span><span class="o">.</span><span class="n">set_rates</span><span class="p">(</span><span class="n">roll_rate</span><span class="o">=</span><span class="mf">1.0</span><span class="p">,</span> <span class="n">pitch_rate</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">yaw_rate</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">thrust</span><span class="o">=</span><span class="mf">0.4</span><span class="p">)</span>
+</code></pre></div>
+<p><span aria-hidden="true" id="L256"></span><br/>
+!!! Описание входных углов на всякий в чем минимальные максимальные и рекомендуемые значения !!!<span aria-hidden="true" id="L257"></span><br/>
+<span aria-hidden="true" id="L258"></span><br/>
+Направления: <code>yaw_rate &gt; 0</code> — против часовой (вид сверху), <code>pitch_rate &gt; 0</code> — нос вверх, <code>roll_rate &gt; 0</code> — влево.<span aria-hidden="true" id="L259"></span><br/>
+<span aria-hidden="true" id="L260"></span></p>
+<hr/>
+<p><span aria-hidden="true" id="L262"></span></p>
+<h3>flip — автоматический кувырок<span aria-hidden="true" id="L263"></span></h3>
+<p><span aria-hidden="true" id="L264"></span><br/>
+Дрон делает почти полный оборот по выбранной оси в три автоматических фазы:<span aria-hidden="true" id="L265"></span><br/>
+1. Набор высоты с заданной скоростью <code>vz</code> в течение <code>climb_duration</code> секунд.<span aria-hidden="true" id="L266"></span><br/>
+2. Вращение по оси с угловой скоростью <code>rate</code> до достижения <code>target_angle</code>.<span aria-hidden="true" id="L267"></span><br/>
+3. Возврат к начальной позиции.<span aria-hidden="true" id="L268"></span><br/>
+<span aria-hidden="true" id="L269"></span></p>
+<blockquote>
+<p><strong>Внимание</strong> Перед кувырком дрон должен находиться минимум на 2 метра над землёй.<span aria-hidden="true" id="L270"></span><br/>
+<span aria-hidden="true" id="L271"></span><br/>
+<span aria-hidden="true" id="L273"></span> <span aria-hidden="true" id="L274"></span> <span aria-hidden="true" id="L275"></span> <span aria-hidden="true" id="L276"></span> <span aria-hidden="true" id="L277"></span> <span aria-hidden="true" id="L278"></span> <span aria-hidden="true" id="L279"></span> <span aria-hidden="true" id="L280"></span> <span aria-hidden="true" id="L281"></span> <span aria-hidden="true" id="L282"></span></p>
+</blockquote>
+<div class="codehilite"><pre><span></span><code><span class="c1"># кувырок вперёд (pitch) — дрон должен висеть на высоте &gt;= 2 м</span>
+<span class="n">drone</span><span class="o">.</span><span class="n">control</span><span class="o">.</span><span class="n">flip</span><span class="p">(</span>
+    <span class="n">axis</span><span class="o">=</span><span class="s2">"pitch"</span><span class="p">,</span>          <span class="c1"># ось: 'roll', 'pitch' или 'yaw'</span>
+    <span class="n">vz</span><span class="o">=</span><span class="mf">2.0</span><span class="p">,</span>                <span class="c1"># скорость подъёма перед флипом (м/с)</span>
+    <span class="n">climb_duration</span><span class="o">=</span><span class="mf">0.5</span><span class="p">,</span>    <span class="c1"># время подъёма (с)</span>
+    <span class="n">rate</span><span class="o">=</span><span class="mf">16.0</span><span class="p">,</span>             <span class="c1"># скорость вращения (рад/с)</span>
+    <span class="n">target_angle</span><span class="o">=</span><span class="mf">6.0</span><span class="p">,</span>      <span class="c1"># 6.0 рад ≈ почти полный оборот (2*pi = 6.28)</span>
+    <span class="n">thrust</span><span class="o">=</span><span class="mf">0.1</span><span class="p">,</span>            <span class="c1"># тяга во время вращения</span>
+    <span class="n">auto_arm</span><span class="o">=</span><span class="kc">False</span>         <span class="c1"># дрон уже в воздухе</span>
+<span class="p">)</span>
+</code></pre></div>
+<p><span aria-hidden="true" id="L284"></span></p>
+<hr/>
+<p><span aria-hidden="true" id="L286"></span></p>
+<h2>Новые команды безопасности и стриминга<span aria-hidden="true" id="L287"></span></h2>
+<p><span aria-hidden="true" id="L288"></span><br/>
+Все новые утилиты ноды <code>offboard_control</code> доступны прямо из <code>drone.control</code>:<span aria-hidden="true" id="L289"></span><br/>
+<span aria-hidden="true" id="L290"></span><br/>
+<span aria-hidden="true" id="L292"></span> <span aria-hidden="true" id="L293"></span> <span aria-hidden="true" id="L294"></span> <span aria-hidden="true" id="L295"></span> <span aria-hidden="true" id="L296"></span> <span aria-hidden="true" id="L297"></span> <span aria-hidden="true" id="L298"></span> <span aria-hidden="true" id="L299"></span> <span aria-hidden="true" id="L300"></span> <span aria-hidden="true" id="L301"></span> <span aria-hidden="true" id="L302"></span> <span aria-hidden="true" id="L303"></span> <span aria-hidden="true" id="L304"></span> <span aria-hidden="true" id="L305"></span> <span aria-hidden="true" id="L306"></span> <span aria-hidden="true" id="L307"></span> <span aria-hidden="true" id="L308"></span> <span aria-hidden="true" id="L309"></span> <span aria-hidden="true" id="L310"></span> <span aria-hidden="true" id="L311"></span> <span aria-hidden="true" id="L312"></span> <span aria-hidden="true" id="L313"></span> <span aria-hidden="true" id="L314"></span> <span aria-hidden="true" id="L315"></span> <span aria-hidden="true" id="L316"></span> <span aria-hidden="true" id="L317"></span> <span aria-hidden="true" id="L318"></span> <span aria-hidden="true" id="L319"></span> <span aria-hidden="true" id="L320"></span></p>
+<div class="codehilite"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">sverk_interfaces</span>
+<span class="n">drone</span> <span class="o">=</span> <span class="n">sverk_interfaces</span><span class="o">.</span><span class="n">init</span><span class="p">(</span><span class="n">Nodename</span><span class="o">=</span><span class="s2">"hardening_demo"</span><span class="p">)</span>
+
+<span class="c1"># аварийный стоп: зависнуть на месте (или land=True — сесть)</span>
+<span class="n">drone</span><span class="o">.</span><span class="n">control</span><span class="o">.</span><span class="n">emergency_stop</span><span class="p">()</span>
+
+<span class="c1"># вернуться на точку взлёта и сесть (PX4 AUTO.RTL)</span>
+<span class="n">drone</span><span class="o">.</span><span class="n">control</span><span class="o">.</span><span class="n">return_to_launch</span><span class="p">()</span>
+
+<span class="c1"># полёт с ожиданием прилёта и живым feedback; действие всегда завершается:</span>
+<span class="c1"># если дрон не долетел за timeout — нода паркует его, success=False</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">on_progress</span><span class="p">(</span><span class="n">fb</span><span class="p">):</span>
+    <span class="nb">print</span><span class="p">(</span><span class="sa">f</span><span class="s2">"[</span><span class="si">{</span><span class="n">fb</span><span class="o">.</span><span class="n">phase</span><span class="si">}</span><span class="s2">] осталось </span><span class="si">{</span><span class="n">fb</span><span class="o">.</span><span class="n">distance_remaining</span><span class="si">:</span><span class="s2">.2f</span><span class="si">}</span><span class="s2"> м, ETA </span><span class="si">{</span><span class="n">fb</span><span class="o">.</span><span class="n">eta</span><span class="si">:</span><span class="s2">.1f</span><span class="si">}</span><span class="s2"> с"</span><span class="p">)</span>
+
+<span class="n">res</span> <span class="o">=</span> <span class="n">drone</span><span class="o">.</span><span class="n">control</span><span class="o">.</span><span class="n">navigate_to</span><span class="p">(</span><span class="n">x</span><span class="o">=</span><span class="mf">1.0</span><span class="p">,</span> <span class="n">y</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">z</span><span class="o">=</span><span class="mf">1.5</span><span class="p">,</span> <span class="n">speed</span><span class="o">=</span><span class="mf">0.5</span><span class="p">,</span>
+                                <span class="n">frame_id</span><span class="o">=</span><span class="s2">"map"</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="mf">30.0</span><span class="p">,</span> <span class="n">tolerance</span><span class="o">=</span><span class="mf">0.2</span><span class="p">,</span>
+                                <span class="n">feedback</span><span class="o">=</span><span class="n">on_progress</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">res</span><span class="o">.</span><span class="n">success</span><span class="p">,</span> <span class="n">res</span><span class="o">.</span><span class="n">message</span><span class="p">,</span> <span class="n">res</span><span class="o">.</span><span class="n">final_distance_error</span><span class="p">)</span>
+
+<span class="c1"># поток телеметрии 10 Гц на 5 секунд (частоту держит нода)</span>
+<span class="n">drone</span><span class="o">.</span><span class="n">control</span><span class="o">.</span><span class="n">stream_telemetry</span><span class="p">(</span><span class="k">lambda</span> <span class="n">t</span><span class="p">:</span> <span class="nb">print</span><span class="p">(</span><span class="n">t</span><span class="o">.</span><span class="n">z</span><span class="p">),</span> <span class="n">rate_hz</span><span class="o">=</span><span class="mf">10.0</span><span class="p">,</span> <span class="n">duration</span><span class="o">=</span><span class="mf">5.0</span><span class="p">)</span>
+
+<span class="c1"># телеметрия постоянным топиком (подписка с правильным QoS — best-effort)</span>
+<span class="n">drone</span><span class="o">.</span><span class="n">control</span><span class="o">.</span><span class="n">set_telemetry_rate</span><span class="p">(</span><span class="mf">50.0</span><span class="p">)</span>
+<span class="n">drone</span><span class="o">.</span><span class="n">control</span><span class="o">.</span><span class="n">subscribe_telemetry</span><span class="p">(</span><span class="k">lambda</span> <span class="n">t</span><span class="p">:</span> <span class="nb">print</span><span class="p">(</span><span class="n">t</span><span class="o">.</span><span class="n">z</span><span class="p">))</span>
+
+<span class="c1"># диагностика ноды: что летит, busy, причина последнего аварийного отката</span>
+<span class="n">s</span> <span class="o">=</span> <span class="n">drone</span><span class="o">.</span><span class="n">control</span><span class="o">.</span><span class="n">get_status</span><span class="p">()</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">s</span><span class="o">.</span><span class="n">setpoint_type</span><span class="p">,</span> <span class="n">s</span><span class="o">.</span><span class="n">active_maneuver</span><span class="p">,</span> <span class="n">s</span><span class="o">.</span><span class="n">last_abort_reason</span><span class="p">)</span>
+</code></pre></div>
+<p><span aria-hidden="true" id="L322"></span><br/>
+Те же команды доступны и из терминала (<code>ros2 service call /emergency_stop ...</code>,<span aria-hidden="true" id="L323"></span><br/>
+<code>ros2 action send_goal /navigate_to ...</code>, <code>ros2 topic echo /offboard_control/status</code>) —<span aria-hidden="true" id="L324"></span><br/>
+см. <a href="offboard-node.md">ноду offboard_control</a>.<span aria-hidden="true" id="L325"></span><br/>
+<span aria-hidden="true" id="L326"></span></p>
+<hr/>
+<p><span aria-hidden="true" id="L328"></span></p>
+<h2>Команды drone.fcu — безопасность и калибровка<span aria-hidden="true" id="L329"></span></h2>
+<p><span aria-hidden="true" id="L330"></span></p>
+<h3>Выключение моторов<span aria-hidden="true" id="L331"></span></h3>
+<p><span aria-hidden="true" id="L332"></span><br/>
+<span aria-hidden="true" id="L334"></span> <span aria-hidden="true" id="L335"></span> <span aria-hidden="true" id="L336"></span></p>
+<div class="codehilite"><pre><span></span><code><span class="n">drone</span><span class="o">.</span><span class="n">fcu</span><span class="o">.</span><span class="n">disarm</span><span class="p">()</span>         <span class="c1"># штатное выключение (только на земле)</span>
+<span class="n">drone</span><span class="o">.</span><span class="n">fcu</span><span class="o">.</span><span class="n">force_disarm</span><span class="p">()</span>   <span class="c1"># принудительное (можно в воздухе, аварийно!)</span>
+<span class="n">drone</span><span class="o">.</span><span class="n">fcu</span><span class="o">.</span><span class="n">kill_switch</span><span class="p">()</span>    <span class="c1"># мгновенная остановка всех моторов</span>
+</code></pre></div>
+<p><span aria-hidden="true" id="L338"></span></p>
+<h3>Калибровки (всегда на земле, до полёта)<span aria-hidden="true" id="L339"></span></h3>
+<p><span aria-hidden="true" id="L340"></span><br/>
+<span aria-hidden="true" id="L342"></span> <span aria-hidden="true" id="L343"></span> <span aria-hidden="true" id="L344"></span> <span aria-hidden="true" id="L345"></span> <span aria-hidden="true" id="L346"></span> <span aria-hidden="true" id="L347"></span></p>
+<div class="codehilite"><pre><span></span><code><span class="n">drone</span><span class="o">.</span><span class="n">fcu</span><span class="o">.</span><span class="n">calibrate_gyro</span><span class="p">()</span>        <span class="c1"># гироскоп (дрон должен стоять неподвижно)</span>
+<span class="n">drone</span><span class="o">.</span><span class="n">fcu</span><span class="o">.</span><span class="n">calibrate_accel</span><span class="p">()</span>       <span class="c1"># акселерометр (потребует 6 положений)</span>
+<span class="n">drone</span><span class="o">.</span><span class="n">fcu</span><span class="o">.</span><span class="n">calibrate_level</span><span class="p">()</span>       <span class="c1"># горизонт (поставьте дрон ровно)</span>
+<span class="n">drone</span><span class="o">.</span><span class="n">fcu</span><span class="o">.</span><span class="n">calibrate_mag</span><span class="p">()</span>         <span class="c1"># компас (нужно вращать дрон вокруг всех осей)</span>
+<span class="n">drone</span><span class="o">.</span><span class="n">fcu</span><span class="o">.</span><span class="n">calibrate_baro</span><span class="p">()</span>        <span class="c1"># барометр (высотомер)</span>
+<span class="n">drone</span><span class="o">.</span><span class="n">fcu</span><span class="o">.</span><span class="n">calibrate_temperature</span><span class="p">()</span> <span class="c1"># температурная калибровка датчиков</span>
+</code></pre></div>
+<p><span aria-hidden="true" id="L349"></span></p>
+<hr/>
+<p><span aria-hidden="true" id="L351"></span></p>
+<h2>Команды drone.led — светодиодная лента<span aria-hidden="true" id="L352"></span></h2>
+<p><span aria-hidden="true" id="L353"></span><br/>
+Доступна, если установлен пакет <code>led_interfaces</code> и запущена нода <code>led_control</code>.<span aria-hidden="true" id="L354"></span><br/>
+<span aria-hidden="true" id="L355"></span><br/>
+!!! Это и так по стандарту лучше что то другое написать !!!<span aria-hidden="true" id="L356"></span><br/>
+<span aria-hidden="true" id="L357"></span><br/>
+<span aria-hidden="true" id="L359"></span> <span aria-hidden="true" id="L360"></span> <span aria-hidden="true" id="L361"></span> <span aria-hidden="true" id="L362"></span> <span aria-hidden="true" id="L363"></span> <span aria-hidden="true" id="L364"></span> <span aria-hidden="true" id="L365"></span> <span aria-hidden="true" id="L366"></span> <span aria-hidden="true" id="L367"></span> <span aria-hidden="true" id="L368"></span> <span aria-hidden="true" id="L369"></span> <span aria-hidden="true" id="L370"></span></p>
+<div class="codehilite"><pre><span></span><code><span class="k">if</span> <span class="n">drone</span><span class="o">.</span><span class="n">led</span><span class="p">:</span>
+    <span class="c1"># заливка всей ленты красным цветом</span>
+    <span class="n">drone</span><span class="o">.</span><span class="n">led</span><span class="o">.</span><span class="n">set_effect</span><span class="p">(</span><span class="s2">"fill"</span><span class="p">,</span> <span class="n">r</span><span class="o">=</span><span class="mi">255</span><span class="p">,</span> <span class="n">g</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="n">b</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+
+    <span class="c1"># мигание зелёным</span>
+    <span class="n">drone</span><span class="o">.</span><span class="n">led</span><span class="o">.</span><span class="n">set_effect</span><span class="p">(</span><span class="s2">"blink"</span><span class="p">,</span> <span class="n">r</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="n">g</span><span class="o">=</span><span class="mi">255</span><span class="p">,</span> <span class="n">b</span><span class="o">=</span><span class="mi">0</span><span class="p">)</span>
+
+    <span class="c1"># радуга по всей ленте</span>
+    <span class="n">drone</span><span class="o">.</span><span class="n">led</span><span class="o">.</span><span class="n">set_effect</span><span class="p">(</span><span class="s2">"rainbow"</span><span class="p">)</span>
+
+    <span class="c1"># управление отдельными светодиодами: (индекс, r, g, b)</span>
+    <span class="n">drone</span><span class="o">.</span><span class="n">led</span><span class="o">.</span><span class="n">set_leds</span><span class="p">([(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">255</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">),</span> <span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">255</span><span class="p">,</span> <span class="mi">0</span><span class="p">),</span> <span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">255</span><span class="p">)])</span>
+</code></pre></div>
+<p><span aria-hidden="true" id="L372"></span><br/>
+Доступные эффекты: <code>fill</code>, <code>blink</code>, <code>blink_fast</code>, <code>fade</code>, <code>wipe</code>, <code>flash</code>, <code>rainbow</code>, <code>rainbow_fill</code>.<span aria-hidden="true" id="L373"></span><br/>
+<span aria-hidden="true" id="L374"></span></p>
+<hr/>
+<p><span aria-hidden="true" id="L376"></span></p>
+<h2>Настройка значений по умолчанию<span aria-hidden="true" id="L377"></span></h2>
+<p><span aria-hidden="true" id="L378"></span><br/>
+Если все команды используют одинаковые параметры, задайте их один раз:<span aria-hidden="true" id="L379"></span><br/>
+<span aria-hidden="true" id="L380"></span><br/>
+<span aria-hidden="true" id="L382"></span> <span aria-hidden="true" id="L383"></span> <span aria-hidden="true" id="L384"></span> <span aria-hidden="true" id="L385"></span> <span aria-hidden="true" id="L386"></span> <span aria-hidden="true" id="L387"></span> <span aria-hidden="true" id="L388"></span> <span aria-hidden="true" id="L389"></span> <span aria-hidden="true" id="L390"></span> <span aria-hidden="true" id="L391"></span></p>
+<div class="codehilite"><pre><span></span><code><span class="n">drone</span><span class="o">.</span><span class="n">control</span><span class="o">.</span><span class="n">configure_defaults</span><span class="p">(</span>
+    <span class="n">frame_id</span><span class="o">=</span><span class="s2">"body"</span><span class="p">,</span>    <span class="c1"># все команды без явного frame_id — в body</span>
+    <span class="n">speed</span><span class="o">=</span><span class="mf">0.5</span><span class="p">,</span>          <span class="c1"># скорость по умолчанию</span>
+    <span class="n">auto_arm</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>     <span class="c1"># не армировать автоматически</span>
+    <span class="n">tolerance</span><span class="o">=</span><span class="mf">0.25</span><span class="p">,</span>     <span class="c1"># точность navigate_wait</span>
+    <span class="n">timeout</span><span class="o">=</span><span class="mf">60.0</span>        <span class="c1"># максимальное ожидание</span>
+<span class="p">)</span>
+
+<span class="c1"># теперь можно коротко</span>
+<span class="n">drone</span><span class="o">.</span><span class="n">control</span><span class="o">.</span><span class="n">navigate_wait</span><span class="p">(</span><span class="n">x</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">y</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">z</span><span class="o">=</span><span class="mf">1.5</span><span class="p">)</span>  <span class="c1"># frame_id='body', speed=0.5</span>
+</code></pre></div>
+<p><span aria-hidden="true" id="L393"></span></p>
+<hr/>
+<p><span aria-hidden="true" id="L395"></span></p>
+<h2>Жизненный цикл программы<span aria-hidden="true" id="L396"></span></h2>
+<p><span aria-hidden="true" id="L397"></span><br/>
+<code>sverk_interfaces.init(...)</code> сам запускает ROS 2, если он ещё не запущен. <code>drone.close()</code> корректно завершает работу. При любом выходе из программы (даже при ошибке) библиотека вызовет <code>close()</code> автоматически через <code>atexit</code>.<span aria-hidden="true" id="L398"></span><br/>
+<span aria-hidden="true" id="L399"></span><br/>
+Рекомендуемая структура любой программы:<span aria-hidden="true" id="L400"></span><br/>
+<span aria-hidden="true" id="L401"></span><br/>
+<span aria-hidden="true" id="L403"></span> <span aria-hidden="true" id="L404"></span> <span aria-hidden="true" id="L405"></span> <span aria-hidden="true" id="L406"></span> <span aria-hidden="true" id="L407"></span> <span aria-hidden="true" id="L408"></span> <span aria-hidden="true" id="L409"></span> <span aria-hidden="true" id="L410"></span></p>
+<div class="codehilite"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">sverk_interfaces</span>
+
+<span class="n">drone</span> <span class="o">=</span> <span class="n">sverk_interfaces</span><span class="o">.</span><span class="n">init</span><span class="p">(</span><span class="n">Nodename</span><span class="o">=</span><span class="s2">"my_program"</span><span class="p">)</span>
+<span class="k">try</span><span class="p">:</span>
+    <span class="c1"># весь код полёта здесь</span>
+    <span class="k">pass</span>
+<span class="k">finally</span><span class="p">:</span>
+    <span class="n">drone</span><span class="o">.</span><span class="n">close</span><span class="p">()</span>  <span class="c1"># выполнится даже при ошибке</span>
+</code></pre></div>
+<p><span aria-hidden="true" id="L412"></span></p>
+<hr/>
+<p><span aria-hidden="true" id="L414"></span></p>
+<h2>Готовые примеры в репозитории<span aria-hidden="true" id="L415"></span></h2>
+<p><span aria-hidden="true" id="L416"></span><br/>
+<span aria-hidden="true" id="L418"></span></p>
+<div class="codehilite"><pre><span></span><code><span class="nb">cd</span><span class="w"> </span>~/sverk_ws<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">source</span><span class="w"> </span>install/setup.bash
+</code></pre></div>
+<p><span aria-hidden="true" id="L420"></span></p>
+<blockquote>
+<p><strong>Примечание</strong> Команды запускаются <strong>внутри контейнера</strong> <code>sverk_ros2</code> — по SSH вы попадаете туда сразу: <code>ssh sverk@&lt;IP_дрона&gt;</code> (порт 22, пароль: sverk).<span aria-hidden="true" id="L421"></span><br/>
+<span aria-hidden="true" id="L422"></span><br/>
+<span aria-hidden="true" id="L424"></span> <span aria-hidden="true" id="L425"></span> <span aria-hidden="true" id="L426"></span> <span aria-hidden="true" id="L427"></span> <span aria-hidden="true" id="L428"></span> <span aria-hidden="true" id="L429"></span> <span aria-hidden="true" id="L430"></span> <span aria-hidden="true" id="L431"></span> <span aria-hidden="true" id="L432"></span> <span aria-hidden="true" id="L433"></span> <span aria-hidden="true" id="L434"></span> <span aria-hidden="true" id="L435"></span> <span aria-hidden="true" id="L436"></span> <span aria-hidden="true" id="L437"></span></p>
+</blockquote>
+<div class="codehilite"><pre><span></span><code><span class="c1"># взлёт на 1 м вперёд и посадка</span>
+python3<span class="w"> </span>src/sverk_drone/sverk_interfaces/examples/simple_takeoff_land.py
+
+<span class="c1"># квадрат в плоскости map</span>
+python3<span class="w"> </span>src/sverk_drone/sverk_interfaces/examples/square_mission.py
+
+<span class="c1"># объёмная фигура «куб» в системе body</span>
+python3<span class="w"> </span>src/sverk_drone/sverk_interfaces/examples/cube_mission.py
+
+<span class="c1"># полёт по кругу через set_position</span>
+python3<span class="w"> </span>src/sverk_drone/sverk_interfaces/examples/circle_trajectory.py
+
+<span class="c1"># монитор телеметрии в консоль</span>
+python3<span class="w"> </span>src/sverk_drone/sverk_interfaces/examples/telemetry_monitor.py
+</code></pre></div>
+<p><span aria-hidden="true" id="L439"></span><br/>
+!!! Это не все нужно свериться с sverk_ws\src\sverk_drone\sverk_interfaces !!!<span aria-hidden="true" id="L440"></span></p>
+                </article>
+
+                
+                <nav class="doc-pagination doc-pagination--mobile" aria-label="Навигация по страницам">
+                    
+                    <a class="doc-pagination-btn doc-pagination-btn--prev" href="/render/preflight-check.md">
+                        <span class="doc-pagination-icon" aria-hidden="true">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M15 18l-6-6 6-6"></path>
+                            </svg>
+                        </span>
+                        <span class="doc-pagination-text">
+                            <span class="doc-pagination-kicker">Предыдущая</span>
+                            <span class="doc-pagination-title">Проверка перед полётом</span>
+                        </span>
+                    </a>
+                    
+
+                    
+                    <a class="doc-pagination-btn doc-pagination-btn--next" href="/render/coordinate-frames.md">
+                        <span class="doc-pagination-text">
+                            <span class="doc-pagination-kicker">Следующая</span>
+                            <span class="doc-pagination-title">Системы координат</span>
+                        </span>
+                        <span class="doc-pagination-icon" aria-hidden="true">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M9 18l6-6-6-6"></path>
+                            </svg>
+                        </span>
+                    </a>
+                    
+                </nav>
+
+                <nav class="doc-pagination doc-pagination--side" aria-label="Навигация по страницам">
+                    
+                    <a class="doc-side-btn doc-side-btn--left" href="/render/preflight-check.md" aria-label="Предыдущая страница: Проверка перед полётом">
+                        <span class="doc-side-btn-icon" aria-hidden="true">
+                            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M15 18l-6-6 6-6"></path>
+                            </svg>
+                        </span>
+                        <span class="doc-side-btn-title">Проверка перед полётом</span>
+                    </a>
+                    
+                    
+                    <a class="doc-side-btn doc-side-btn--right" href="/render/coordinate-frames.md" aria-label="Следующая страница: Системы координат">
+                        <span class="doc-side-btn-title">Системы координат</span>
+                        <span class="doc-side-btn-icon" aria-hidden="true">
+                            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M9 18l6-6-6-6"></path>
+                            </svg>
+                        </span>
+                    </a>
+                    
+                </nav>
+                
+            </div>
+        </main>
+    </div>
+
+    <button class="scroll-to-top" id="scrollToTop" aria-label="Прокрутить вверх">
+        ↑
+    </button>
+
+    <script src="/static/main.js"></script>
+</body>
+</html>

@@ -112,6 +112,8 @@ def start_agent(host: str, args) -> tuple[str, subprocess.Popen]:
         f" --watchdog {args.watchdog} --color {args.color} --frame {args.frame}"
         f" --allow-scan --scan-radius {args.scan_radius}"
         + (" --no-yaw-hold" if args.no_yaw_hold else "")
+        + (" --no-alt-hold" if args.no_alt_hold else "")
+        + (f" --pad-z {args.pad_z}" if args.pad_z is not None else "")
         + f" </dev/null >{log} 2>&1"
     )
     proc = subprocess.Popen(
@@ -178,6 +180,20 @@ def show_status(drone: HttpRobot) -> dict:
         else:
             drift = st.get("yaw_drift")
             say(f"курс: увод {drift:+d}°" if drift is not None else "курс: увод ещё не мерян")
+    if "agl" in st:
+        # Высоту борт держит по дальномеру, а поле разновысотное: «под дроном» — это
+        # насколько поверхность под ним выше своей площадки (крыша дома даёт плюс),
+        # «над полем» — высота, которую он на самом деле держит.
+        agl = st.get("agl")
+        if agl is None:
+            say("высота: замера ещё не было")
+        else:
+            say(f"над полем {agl:.2f} м, под дроном {st.get('ground', 0.0):+.2f} м, "
+                f"ступенек: {st.get('terrain_steps', 0)}")
+        if st.get("terrain_warning"):
+            say(f"высота: {st['terrain_warning']}")
+    elif st.get("alt_hold_off"):
+        say(f"высоту борт не держит: {st['alt_hold_off']}")
     if st.get("last_error"):
         say(f"последняя ошибка борта: {st['last_error']}")
     return st
@@ -223,7 +239,13 @@ def explain_shot(frame: bytes, path: str, drone: HttpRobot) -> str:
         return ""
     say(f"метки на кадре: {obs.markers_seen or 'нет'}; привязка: {obs.anchor}")
     if obs.found:
-        say(f"ОЧАГ виден в клетке {list(obs.fire_cell)} (пятно {int(obs.area)} пикселей)")
+        say(
+            f"ОЧАГ виден в клетке {list(obs.fire_cell)}: огоньков {obs.fire_count} "
+            f"= столько же поездок за водой (счёт по «{obs.count_source}», "
+            f"кучка {obs.spread_m:.2f} м, пятна {int(obs.area)} пикселей)"
+        )
+        if obs.note:
+            say(f"оговорка: {obs.note}")
     else:
         say(f"очага не видно: {obs.note}")
     marked = path[:-4] + "-mark.jpg"
@@ -538,6 +560,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--no-yaw-hold", action="store_true",
         help="не держать курс дрона по метке площадки (по умолчанию борт его держит)",
+    )
+    p.add_argument(
+        "--no-alt-hold", action="store_true",
+        help="не держать высоту по дальномеру (по умолчанию борт её держит и не "
+             "проседает, когда из-под него уходит крыша дома)",
+    )
+    p.add_argument(
+        "--pad-z", type=float, default=None,
+        help="измеренная рулеткой высота площадки над полом поля, м; без ключа борт "
+             "берёт её из карты поля по клетке (карта на железе не проверялась)",
     )
     p.add_argument("--no-upload", action="store_true", help="не обновлять программу на борту")
     p.add_argument("--no-restart", action="store_true", help="не перезапускать уже работающую")

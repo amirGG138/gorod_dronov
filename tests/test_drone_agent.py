@@ -44,11 +44,17 @@ class Control:
         self.armed = True
         self.telemetry_hangs = False
         self.calls: list[dict] = []     # аргументы каждого navigate: по ним видно курс
+        self.altitudes: list[dict] = []  # аргументы каждого set_altitude
+        self.gap = 1.5                  # что дальномер «видит» под дроном, м
 
     def navigate(self, **kw):
         self.navigates += 1
         self.calls.append(kw)
         self.armed = True
+        return Resp()
+
+    def set_altitude(self, z, frame_id="map"):
+        self.altitudes.append({"z": z, "frame_id": frame_id})
         return Resp()
 
     def land(self):
@@ -59,7 +65,10 @@ class Control:
     def get_telemetry(self, frame_id="body"):
         if self.telemetry_hangs:
             time.sleep(30.0)
-        return types.SimpleNamespace(x=0.0, y=0.0, z=0.0, armed=self.armed, mode="OFFBOARD")
+        # terrain — расстояние до поверхности прямо под дроном, остальные фреймы для
+        # этих тестов неинтересны и отвечают нулями.
+        z = self.gap if frame_id == "terrain" else 0.0
+        return types.SimpleNamespace(x=0.0, y=0.0, z=z, armed=self.armed, mode="OFFBOARD")
 
 
 class Camera:
@@ -430,6 +439,288 @@ class TestYawKeeper(unittest.TestCase):
         threading.Thread(target=agent.keeper, daemon=True).start()
         time.sleep(1.0)
         self.assertEqual(agent.drone.control.navigates, before)
+
+
+class TestTerrain(unittest.TestCase):
+    """Скачок замера — это смена поверхности, и уходить он должен в цель, а не в дрон."""
+
+    def make(self, **kw):
+        # Дрон стоит на крыше высотой 0,5 м: уровни под ним — сама крыша (0) и пол
+        # поля под ней (−0,5), считая от своей площадки.
+        args = dict(step=0.25, settle=0.15, gap=1.5, climb_speed=0.3, ground_max=1.5,
+                    levels=(0.0, -0.5))
+        args.update(kw)
+        return da.Terrain(**args)
+
+    def test_leaving_the_roof_asks_for_a_bigger_gap_not_a_descent(self):
+        """Слёт с крыши: до поверхности стало больше, а над полем — столько же."""
+        t = self.make()
+        self.assertEqual(t.update(1.50, 0.0, 1.5), "first")
+        self.assertEqual(t.update(2.00, 0.1, 1.5), "step")
+        self.assertAlmostEqual(t.ground, -0.5)
+        self.assertAlmostEqual(t.agl, 1.5)
+        # Главное: просим ровно тот зазор, который дальномер и видит, — дрону нечего
+        # исправлять, и он остаётся на месте.
+        self.assertAlmostEqual(t.target(1.5, 0.4, 3.5), 2.0)
+
+    def test_returning_to_the_roof_is_a_step_the_other_way(self):
+        t = self.make()
+        t.update(2.00, 0.0, 1.5)
+        t.ground = -0.5
+        self.assertEqual(t.update(1.50, 0.1, 1.5), "step")
+        self.assertAlmostEqual(t.ground, 0.0)
+        self.assertAlmostEqual(t.agl, 1.5)
+        self.assertAlmostEqual(t.target(1.5, 0.4, 3.5), 1.5)
+
+    def test_a_step_is_taken_at_once_without_a_second_opinion(self):
+        """Подтверждать скачок вторым замером нельзя: автопилот отработает его раньше."""
+        t = self.make()
+        t.update(1.50, 0.0, 1.5)
+        self.assertEqual(t.update(2.00, 0.1, 1.5), "step")
+        self.assertEqual(t.steps, 1)
+
+    def test_a_blip_matching_no_level_only_suspends_the_drift_fixing(self):
+        """Дальномер поймал провод: уровень «не узнан», но по возвращении восстановлен."""
+        t = self.make()
+        t.update(1.50, 0.0, 1.5)
+        self.assertEqual(t.update(0.60, 0.1, 1.5), "step")
+        self.assertFalse(t.known)       # 0,9 м не похожи ни на крышу, ни на пол
+        self.assertEqual(t.update(1.50, 0.2, 1.5), "step")
+        self.assertTrue(t.known)
+        self.assertAlmostEqual(t.ground, 0.0)
+        self.assertAlmostEqual(t.agl, 1.5)
+
+    def test_a_level_close_to_a_known_one_is_snapped_to_it(self):
+        """Шум в пару сантиметров не должен копиться в уровне поверхности."""
+        t = self.make()
+        t.update(1.50, 0.0, 1.5)
+        t.update(1.96, 0.1, 1.5)        # скачок на 0,46 вместо ровных 0,5
+        self.assertTrue(t.known)
+        self.assertAlmostEqual(t.ground, -0.5)
+
+    def test_slow_drift_is_the_drone_itself(self):
+        """Всплытие на 15 см за такт — это дрон, и высота у него честно изменилась."""
+        t = self.make()
+        t.update(1.50, 0.0, 1.5)
+        self.assertEqual(t.update(1.65, 0.3, 1.5), "ok")
+        self.assertEqual(t.ground, 0.0)
+        self.assertAlmostEqual(t.agl, 1.65)
+
+    def test_the_same_step_spread_over_many_ticks_is_not_a_step(self):
+        """Медленный подъём на те же полметра ступенькой не считается: это дрейф."""
+        t = self.make()
+        t.update(1.50, 0.0, 1.5)
+        for i, h in enumerate((1.60, 1.70, 1.80, 1.90, 2.00), start=1):
+            self.assertEqual(t.update(h, 0.3 * i, 1.5), "ok")
+        self.assertEqual(t.ground, 0.0)
+        self.assertAlmostEqual(t.agl, 2.0)
+
+    def test_a_long_silence_picks_the_level_that_explains_the_measurement(self):
+        """После перерыва уровень не додумывается, а выбирается из известных."""
+        t = self.make()
+        t.update(1.50, 0.0, 1.5)
+        self.assertEqual(t.update(2.00, 5.0, 1.5), "resync")
+        self.assertAlmostEqual(t.ground, -0.5)      # 2,0 м до поверхности = дрон над полом
+        self.assertAlmostEqual(t.agl, 1.5)
+
+    def test_a_long_silence_that_fits_no_level_is_admitted_not_guessed(self):
+        """Ни один уровень не объясняет замер — честно говорим «не знаю»."""
+        t = self.make()
+        t.update(1.50, 0.0, 1.5)
+        self.assertEqual(t.update(3.00, 5.0, 1.5), "gap")
+        self.assertFalse(t.known)
+        self.assertEqual(t.ground, 0.0)             # вслепую уровень не двигаем
+
+    def test_without_a_map_a_silence_leaves_the_level_alone(self):
+        """Сверять не с чем — но и списывать уход дрона на рельеф больше не станем."""
+        t = self.make(levels=())
+        t.update(1.50, 0.0, 1.5)
+        self.assertEqual(t.update(1.00, 5.0, 1.5), "gap")
+        self.assertEqual(t.ground, 0.0)
+        self.assertTrue(t.known)
+
+    def test_target_is_lower_over_a_house_by_its_height(self):
+        t = self.make()
+        t.ground = 0.5
+        self.assertAlmostEqual(t.target(1.5, 0.4, 3.5), 1.0)
+
+    def test_target_keeps_a_clearance_and_the_ceiling(self):
+        """Ошибиться в уровне поверхности можно, а висеть в 10 см над крышей — нет."""
+        t = self.make()
+        t.ground = 1.4
+        self.assertAlmostEqual(t.target(1.5, 0.4, 3.5), 0.4)
+        t.ground = -3.0
+        self.assertAlmostEqual(t.target(1.5, 0.4, 3.5), 3.5)
+
+    def test_an_impossible_surface_level_is_clipped_and_flagged(self):
+        t = self.make(ground_max=1.0, levels=())
+        t.update(3.00, 0.0, 1.5)
+        t.update(0.10, 0.3, 1.5)        # скачок, от которого уровень уехал бы на 2,9 м
+        self.assertAlmostEqual(t.ground, 1.0)
+        self.assertTrue(t.clipped)
+
+    def test_rubbish_measurements_are_refused(self):
+        t = self.make()
+        self.assertEqual(t.update(float("nan"), 0.0, 1.5), "bad")
+        self.assertEqual(t.update(-1.0, 0.0, 1.5), "bad")
+        self.assertIsNone(t.agl)
+
+
+class TestLevels(unittest.TestCase):
+    """Уровни поверхности берутся из карты поля, а не выдумываются в полёте."""
+
+    def test_pad_height_comes_from_the_field_map(self):
+        agent = make_agent("--cell", "1,1")
+        self.assertAlmostEqual(agent.pad_z, 0.825)
+        self.assertEqual(agent.terrain.levels, (-0.825, 0.0))
+
+    def test_measured_height_beats_the_map(self):
+        agent = make_agent("--cell", "1,1", "--pad-z", "0.79")
+        self.assertAlmostEqual(agent.pad_z, 0.79)
+
+    def test_extra_levels_are_counted_from_our_own_pad(self):
+        agent = make_agent("--cell", "1,4", "--levels", "0.515, 0.825")
+        self.assertEqual(agent.terrain.levels, (-0.515, 0.0, 0.31))
+
+    def test_rubbish_in_levels_does_not_stop_the_drone(self):
+        self.assertEqual(da.parse_levels("0.5, , ерунда;0.8"), [0.5, 0.8])
+        self.assertEqual(da.parse_levels(""), [])
+
+
+class TestAltKeeper(unittest.TestCase):
+    """Такт удержания высоты на висении: что именно уходит в set_altitude."""
+
+    def hovering(self, *argv):
+        agent = make_agent("--alt-period", "0.1", "--alt-timeout", "0.2",
+                           "--pad-z", "0.5", *argv)
+        agent.takeoff(1.5)
+        wait_state(agent, ("hover",))
+        time.sleep(0.15)                # пауза после движения, иначе поправка отложится
+        return agent
+
+    def test_leaving_the_roof_does_not_drop_the_drone(self):
+        """Слёт с крыши 0,5 м: цель по дальномеру выросла на те же 0,5 м, дрон стоит."""
+        agent = self.hovering()
+        control = agent.drone.control
+        self.assertEqual(agent._alt_tick(), "first")
+        control.gap = 2.0               # вылетели за край крыши: под нами пол поля
+        self.assertEqual(agent._alt_tick(), "step")
+        # Просим ровно тот зазор, который дальномер и видит: автопилоту нечего
+        # «исправлять», и он никуда не идёт.
+        self.assertEqual(control.altitudes[-1], {"z": 2.0, "frame_id": "terrain"})
+        self.assertAlmostEqual(agent.status()["agl"], 1.5)
+        self.assertAlmostEqual(agent.status()["ground"], -0.5)
+        self.assertEqual(agent.status()["terrain_steps"], 1)
+
+    def test_the_edge_is_caught_during_a_hop_and_the_hop_survives(self):
+        """Край крыши пересекается в перелёте — и раньше это был слепой участок."""
+        agent = self.hovering()
+        control = agent.drone.control
+        agent._alt_tick()
+        agent._busy, agent.current = True, "перелёт"    # дрон в пути
+        control.gap = 2.0
+        self.assertEqual(agent._alt_tick(), "step")
+        self.assertEqual(control.altitudes[-1], {"z": 2.0, "frame_id": "terrain"})
+        # Поправка идёт мимо start(): перелёт не отменён и не подменён.
+        self.assertTrue(agent._busy)
+        self.assertEqual(agent.current, "перелёт")
+        self.assertEqual(control.navigates, 1)         # только сам взлёт
+
+    def test_a_correction_that_did_not_get_through_is_repeated(self):
+        """Команда сорвалась — но у автопилота осталась цель от прежней поверхности."""
+        agent = self.hovering()
+        control = agent.drone.control
+        agent._alt_tick()
+        works = control.set_altitude
+        control.set_altitude = self._failing_once(works)
+        control.gap = 2.0               # вылетели за край крыши
+        self.assertEqual(agent._alt_tick(), "busy")
+        self.assertEqual(control.altitudes, [])
+        # Следующий такт видит ту же поверхность и повторяет несостоявшуюся цель.
+        self.assertEqual(agent._alt_tick(), "retry")
+        self.assertEqual(control.altitudes[-1], {"z": 2.0, "frame_id": "terrain"})
+
+    @staticmethod
+    def _failing_once(works):
+        state = {"first": True}
+
+        def flaky(z, frame_id="map"):
+            if state["first"]:
+                state["first"] = False
+                raise RuntimeError("нода не ответила")
+            return works(z, frame_id=frame_id)
+
+        return flaky
+
+    def test_drift_is_left_to_the_hop_itself(self):
+        """В перелёте правим только рельеф: высоту там задаёт сама команда."""
+        agent = self.hovering()
+        agent._alt_tick()
+        agent._busy = True
+        agent.drone.control.gap = 1.68
+        self.assertEqual(agent._alt_tick(), "flying")
+        self.assertEqual(agent.drone.control.altitudes, [])
+
+    def test_an_unrecognised_level_suspends_the_drift_fixing(self):
+        """Уровень не похож ни на крышу, ни на пол — дрейф не правим, скачки ловим."""
+        agent = self.hovering()
+        control = agent.drone.control
+        agent._alt_tick()
+        control.gap = 0.6               # дальномер поймал что-то постороннее
+        self.assertEqual(agent._alt_tick(), "step")
+        self.assertFalse(agent.terrain.known)
+        control.gap = 0.62              # держится, но ни на один уровень не ложится
+        self.assertEqual(agent._alt_tick(), "unsure")
+        self.assertIn("не опознан", agent.status()["terrain_warning"])
+
+    def test_a_drifting_drone_is_returned(self):
+        agent = self.hovering()
+        control = agent.drone.control
+        agent._alt_tick()
+        control.gap = 1.68              # всплыл сам: медленно и понемногу
+        self.assertEqual(agent._alt_tick(), "ok")
+        self.assertEqual(control.altitudes[-1], {"z": 1.5, "frame_id": "terrain"})
+
+    def test_noise_inside_the_dead_zone_is_left_alone(self):
+        agent = self.hovering()
+        agent._alt_tick()
+        agent.drone.control.gap = 1.55
+        self.assertEqual(agent._alt_tick(), "hold")
+        self.assertEqual(agent.drone.control.altitudes, [])
+
+    def test_a_drone_on_the_ground_is_not_lifted(self):
+        agent = self.hovering()
+        agent.land()
+        wait_state(agent, ("landed", "landed_unverified"))
+        agent.drone.control.gap = 0.05
+        self.assertEqual(agent._alt_tick(), "idle")
+        self.assertEqual(agent.drone.control.altitudes, [])
+
+    def test_switched_off_by_the_flag(self):
+        agent = self.hovering("--no-alt-hold")
+        self.assertFalse(agent.alt_hold)
+        self.assertEqual(agent._alt_tick(), "idle")
+        self.assertNotIn("agl", agent.status())
+
+    def test_a_silent_rangefinder_stops_the_holding_not_the_flight(self):
+        """Замера нет — высоту не держим и говорим об этом, но дрон летит дальше."""
+        agent = self.hovering("--alt-fails", "2")
+        agent.drone.control.telemetry_hangs = True
+        self.assertEqual(agent._alt_tick(), "no-data")
+        self.assertEqual(agent._alt_tick(), "no-data")
+        self.assertFalse(agent.alt_hold)
+        self.assertEqual(agent.state, "hover")
+        self.assertIn("alt_hold_off", agent.status())
+
+    def test_takeoff_makes_its_own_pad_the_zero(self):
+        """Своя площадка — крыша дома, и «полтора метра» отсчитываются от неё."""
+        agent = self.hovering()
+        agent.terrain.ground = 0.5
+        agent.takeoff(1.5)              # уже в воздухе: команда до navigate не дойдёт
+        agent.land()
+        wait_state(agent, ("landed", "landed_unverified"))
+        self.assertEqual(agent.terrain.ground, 0.0)
+        self.assertIsNone(agent.terrain.agl)
 
 
 class TestOverHttp(unittest.TestCase):

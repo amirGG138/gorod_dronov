@@ -86,7 +86,10 @@ class Log:
                 f"{counted}"
             )
         if type_ == "SCAN":
-            seen = "очаг " + _fmt_cell(r.get("fire_cell")) if r.get("fire_cell") else "пусто"
+            if r.get("fire_cell"):
+                seen = f"очаг {_fmt_cell(r.get('fire_cell'))} огоньков={r.get('fire_count')}"
+            else:
+                seen = "пусто"
             return (
                 f"{r.get('drone')} точка ({r.get('xy', ['?', '?'])[0]}, {r.get('xy', ['?', '?'])[1]}) "
                 f"привязка={r.get('anchor')} {seen}"
@@ -94,7 +97,8 @@ class Log:
         if type_ == "FIRE_SPOTTED":
             return (
                 f"{_fmt_cell(r.get('cell'))} голосов {r.get('votes')}/{r.get('total')} "
-                f"уровень={r.get('level')} ({r.get('level_source')})"
+                f"огоньков={r.get('fire_count')} уровень={r.get('level')} "
+                f"({r.get('level_source')})"
             )
         if type_ == "ROBOT":
             return f"{r.get('name')} ({r.get('role')}) {r.get('url')} {_fmt_cell(r.get('cell'))}"

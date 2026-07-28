@@ -22,10 +22,18 @@
 этого кадр «считает» себя выше, чем есть. Грабли наши, с «Змейки»
 (docs/zmeyka.md, hold_aruco/hold_aruco.py:201).
 
-Пожар на нашем поле обозначен физическим «огоньком» без числа, поэтому здесь
-ищется только КЛЕТКА очага, по цвету. Уровень пожара (сколько раз ехать за водой)
-цветом не определяется: он приходит из настроек, а с этапа 7 — от VLM. Выдумывать
-уровень по картинке нельзя.
+Пожар на нашем поле обозначен физическими «огоньками» без числа, и степень пожара
+задаётся тем, СКОЛЬКО жетонов лежит рядом: три огонька кучкой = уровень 3, то есть
+три поездки за водой. Поэтому здесь ищется и клетка очага, и число жетонов в кучке.
+Считается это так: все пятна нужного цвета переводятся в метры поля, пятна ближе
+vision.fire_group_m друг к другу собираются в одну кучку, а число жетонов в кучке —
+это число пятен, плюс поправка на слипшиеся (пятно заметно крупнее одиночного
+жетона — значит жетонов в нём несколько). Чем именно получено число, пишется в
+count_source: blobs (посчитаны пятна) | area (поделили площадь) | mixed.
+
+Чего здесь по-прежнему НЕ делается: уровень не выдумывается. Если кучку посчитать
+не вышло или насчитано больше, чем бывает на поле, наружу уходит level=None, и
+диспетчер честно берёт уровень из настроек, пометив это в логе.
 
 Проверка кадра руками:
 
@@ -66,6 +74,23 @@ FIRE_HSV = (((0, 120, 40), (5, 255, 255)), ((170, 120, 40), (180, 255, 255)))
 MIN_AREA_PX = 150
 MAX_AREA_SHARE = 0.15  # больше — это цветной район поля, а не «огонёк»
 FOV_DEG = 65.0  # угол обзора камеры по горизонтали, ГИПОТЕЗА — измерить на площадке
+
+# --- счёт огоньков ---------------------------------------------------------------
+# Жетоны одного пожара лежат кучкой, но граница клетки может пройти между ними,
+# поэтому кучка собирается по расстоянию НА ПОЛЕ, а не по клетке. 0,4 м — половина
+# клетки: три жетона по 4,5 см в такую кучку укладываются, а очаги в разных клетках
+# (0,8 м) не слипаются.
+GROUP_M = 0.4
+TOKEN_M = 0.045  # длинная сторона жетона, м — по фотографиям photo_fire/
+# Доля своего квадрата, которую занимает силуэт жетона. ЗАМЕРЕНО по тем же восьми
+# фотографиям: площадь пятна к квадрату длинной стороны даёт 0,45..0,49 (жетон —
+# язычок пламени, а не квадрат). Нужно только там, где жетоны слиплись в одно пятно
+# и делить их приходится по площади.
+TOKEN_FILL = 0.47
+# Во сколько раз пятно должно быть крупнее одиночного жетона, чтобы считать его за
+# несколько. 1,6 — с запасом: одиночный жетон даёт разброс до 1,2, два слипшихся — 2.
+SPLIT_RATIO = 1.6
+MAX_FIRE_COUNT = 3  # больше огоньков на поле не бывает; насчитали больше — это ошибка
 
 
 class VisionError(Exception):
@@ -240,9 +265,13 @@ class Blob:
     share: float  # доля площади кадра
 
 
-def find_fire(bgr, hsv_ranges: Iterable = FIRE_HSV, min_area: float = MIN_AREA_PX,
-              max_share: float = MAX_AREA_SHARE) -> Blob | None:
-    """Самое крупное пятно цвета огня или None.
+def find_fires(bgr, hsv_ranges: Iterable = FIRE_HSV, min_area: float = MIN_AREA_PX,
+               max_share: float = MAX_AREA_SHARE) -> list[Blob]:
+    """Все пятна цвета огня, крупные первыми.
+
+    Пятен несколько не случайно: степень пожара на поле задана числом жетонов,
+    лежащих рядом. Поэтому здесь ничего не схлопывается — кто из пятен образует
+    одну кучку, решается уже в метрах поля (см. look).
 
     Верхний порог площади не декоративный: по углам поля лежат ЦВЕТНЫЕ РАЙОНЫ, и
     красноватый район в кадре — это огромное пятно почти нужного цвета. «Огонёк» —
@@ -255,7 +284,7 @@ def find_fire(bgr, hsv_ranges: Iterable = FIRE_HSV, min_area: float = MIN_AREA_P
         part = cv2.inRange(hsv, np.array(low, np.uint8), np.array(high, np.uint8))
         mask = part if mask is None else cv2.bitwise_or(mask, part)
     if mask is None:
-        return None
+        return []
     # Ядро 3x3, а не 5x5: с рабочей высоты жетон занимает всего десятки пикселей, и
     # более крупное ядро съедало его целиком (проверено на photo_fire/ в уменьшенном
     # до бортового размера виде). Сначала убираем крапинки, потом сращиваем язычки
@@ -267,7 +296,7 @@ def find_fire(bgr, hsv_ranges: Iterable = FIRE_HSV, min_area: float = MIN_AREA_P
     found = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     contours = found[0] if len(found) == 2 else found[1]  # OpenCV 3 отдавала три значения
     frame_area = float(bgr.shape[0] * bgr.shape[1])
-    best: Blob | None = None
+    found_blobs: list[Blob] = []
     for contour in contours:
         area = float(cv2.contourArea(contour))
         share = area / frame_area if frame_area else 0.0
@@ -276,10 +305,153 @@ def find_fire(bgr, hsv_ranges: Iterable = FIRE_HSV, min_area: float = MIN_AREA_P
         moments = cv2.moments(contour)
         if moments["m00"] <= 0:
             continue
-        blob = Blob(moments["m10"] / moments["m00"], moments["m01"] / moments["m00"], area, share)
-        if best is None or blob.area > best.area:
-            best = blob
-    return best
+        found_blobs.append(
+            Blob(moments["m10"] / moments["m00"], moments["m01"] / moments["m00"], area, share)
+        )
+    return sorted(found_blobs, key=lambda b: b.area, reverse=True)
+
+
+def find_fire(bgr, hsv_ranges: Iterable = FIRE_HSV, min_area: float = MIN_AREA_PX,
+              max_share: float = MAX_AREA_SHARE) -> Blob | None:
+    """Самое крупное пятно цвета огня или None — когда важно «горит ли вообще»."""
+    fires = find_fires(bgr, hsv_ranges, min_area, max_share)
+    return fires[0] if fires else None
+
+
+# --- кучка жетонов = степень пожара ------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Spot:
+    """Пятно, уже переведённое из пикселей в метры поля."""
+
+    u: float
+    v: float
+    x: float
+    y: float
+    area: float
+    share: float
+
+
+@dataclass
+class Group:
+    """Кучка жетонов: где она и сколько огоньков в ней насчитано."""
+
+    spots: list[Spot]
+    count: int
+    source: str  # blobs | area | mixed — по чему получилось число
+    x: float
+    y: float
+    area: float
+    share: float
+    spread: float  # размер кучки, м: далеко разъехавшаяся кучка — повод посмотреть кадр
+
+
+def token_px(mpp: float, token_m: float = TOKEN_M, token_fill: float = TOKEN_FILL) -> float:
+    """Сколько пикселей занимает ОДИН жетон при таком масштабе кадра.
+
+    Нужно ровно для одного случая: жетоны слиплись в единое пятно, и разделить их
+    по контурам нельзя. Тогда единственная опора — известный размер жетона.
+    Точность здесь равна точности масштаба: с привязкой по метке он измерен по
+    настоящему маркеру 25 см, а с привязкой «по точке съёмки» зависит от
+    camera.fov_deg, который на площадке ещё надо померить.
+    """
+    if mpp <= 0:
+        return 0.0
+    side = token_m / mpp
+    return side * side * token_fill
+
+
+def clusters(spots: Sequence[Spot], group_m: float = GROUP_M) -> list[list[Spot]]:
+    """Разбить пятна на кучки: ближе group_m хотя бы к одному соседу — одна кучка.
+
+    Связность именно по соседу, а не по центру кучки: три жетона в ряд образуют
+    одну кучку, даже если крайние друг от друга дальше порога. Пятен единицы,
+    поэтому наивного перебора хватает с запасом.
+    """
+    groups: list[list[Spot]] = []
+    for spot in spots:
+        merged = [spot]
+        rest: list[list[Spot]] = []
+        for group in groups:
+            if any(math.hypot(spot.x - s.x, spot.y - s.y) <= group_m for s in group):
+                merged.extend(group)
+            else:
+                rest.append(group)
+        rest.append(merged)
+        groups = rest
+    return groups
+
+
+def count_tokens(
+    spots: Sequence[Spot],
+    unit_px: float,
+    split_ratio: float = SPLIT_RATIO,
+) -> tuple[int, str]:
+    """Сколько жетонов в кучке и по чему это посчитано.
+
+    Основной счёт — по числу пятен: жетоны с зазором дают каждый своё пятно, и это
+    точно. Поправка — по площади: слипшиеся жетоны дают одно пятно, зато кратное по
+    размеру одиночному. Эталон одиночного берётся, если можно, из самой кучки
+    (наименьшее пятно в ней), и только для кучки из одного пятна — из размера жетона
+    и масштаба кадра: свой же жетон в кадре — мерка честнее любой расчётной.
+    """
+    if not spots:
+        return 0, "blobs"
+    unit = min(s.area for s in spots) if len(spots) >= 2 else unit_px
+    if unit <= 0:
+        unit = unit_px
+    total, split = 0, 0
+    for spot in spots:
+        n = 1
+        if unit > 0 and spot.area >= split_ratio * unit:
+            n = max(1, int(round(spot.area / unit)))
+        total += n
+        if n > 1:
+            split += 1
+    if not split:
+        return total, "blobs"
+    return total, "area" if len(spots) == 1 else "mixed"
+
+
+def _group(spots: Sequence[Spot], unit_px: float, split_ratio: float) -> Group:
+    """Собрать кучку в один ответ: центр по площади, размах, число жетонов."""
+    area = sum(s.area for s in spots)
+    weight = area if area > 0 else float(len(spots))
+    if area > 0:
+        x = sum(s.x * s.area for s in spots) / weight
+        y = sum(s.y * s.area for s in spots) / weight
+    else:
+        x = sum(s.x for s in spots) / weight
+        y = sum(s.y for s in spots) / weight
+    spread = max(
+        (math.hypot(a.x - b.x, a.y - b.y) for a in spots for b in spots),
+        default=0.0,
+    )
+    count, source = count_tokens(spots, unit_px, split_ratio)
+    return Group(
+        spots=list(spots),
+        count=count,
+        source=source,
+        x=x,
+        y=y,
+        area=area,
+        share=sum(s.share for s in spots),
+        spread=spread,
+    )
+
+
+def _clipped(group: Group, shape: Sequence[int], margin_px: float) -> bool:
+    """Кучка подошла к краю кадра — значит часть жетонов могла в него не попасть.
+
+    Такой кадр годится, чтобы сказать ГДЕ горит, но плох, чтобы сказать СКОЛЬКО:
+    при сведении наблюдений он уступает кадру, где кучка целиком внутри.
+    """
+    height, width = float(shape[0]), float(shape[1])
+    return any(
+        s.u < margin_px or s.u > width - margin_px or s.v < margin_px or s.v > height - margin_px
+        for s in group.spots
+    )
 
 
 # --- разбор одного кадра ---------------------------------------------------------
@@ -292,8 +464,13 @@ class Observation:
     drone: str = ""
     fire_cell: Cell | None = None
     fire_xy: tuple[float, float] | None = None
-    blob_uv: tuple[float, float] | None = None  # где пятно в кадре — для разметки
-    area: float = 0.0
+    blob_uv: tuple[float, float] | None = None  # центр кучки в кадре — для разметки
+    fire_count: int = 0  # сколько огоньков насчитано в кучке = степень пожара
+    count_source: str = ""  # blobs | area | mixed
+    blobs_uv: list[tuple[float, float]] = dc_field(default_factory=list)  # все пятна кучки
+    spread_m: float = 0.0  # размах кучки, м
+    clipped: bool = False  # кучка у края кадра: считать по нему число ненадёжно
+    area: float = 0.0  # суммарная площадь пятен кучки, пиксели
     share: float = 0.0
     anchor: str = "none"  # markers | marker | pose | none
     marker_id: int | None = None
@@ -310,6 +487,10 @@ class Observation:
             "drone": self.drone,
             "fire_cell": list(self.fire_cell) if self.fire_cell else None,
             "fire_xy": [round(v, 3) for v in self.fire_xy] if self.fire_xy else None,
+            "fire_count": self.fire_count,
+            "count_source": self.count_source,
+            "spread_m": round(self.spread_m, 3),
+            "clipped": self.clipped,
             "area": round(self.area, 1),
             "share": round(self.share, 4),
             "anchor": self.anchor,
@@ -342,8 +523,12 @@ def look(
     hsv_ranges: Iterable = FIRE_HSV,
     min_area: float = MIN_AREA_PX,
     max_share: float = MAX_AREA_SHARE,
+    group_m: float = GROUP_M,
+    token_m: float = TOKEN_M,
+    token_fill: float = TOKEN_FILL,
+    split_ratio: float = SPLIT_RATIO,
 ) -> Observation:
-    """Разобрать кадр целиком: метки -> привязка -> «огонёк» -> клетка."""
+    """Разобрать кадр целиком: метки -> привязка -> «огоньки» -> клетка и их число."""
     seen = markers(bgr)
     obs = Observation(drone=drone, markers_seen=sorted(seen))
     anchor = anchor_from_markers(seen, pads, field, marker_edge)
@@ -354,18 +539,40 @@ def look(
         return obs
     obs.anchor, obs.marker_id = anchor.source, anchor.marker_id
 
-    blob = find_fire(bgr, hsv_ranges, min_area, max_share)
-    if blob is None:
+    blobs = find_fires(bgr, hsv_ranges, min_area, max_share)
+    if not blobs:
         obs.note = "очага в кадре нет"
         return obs
-    x, y = anchor.to_map(blob.u, blob.v)
-    cell = field.m_to_cell(x, y)
-    obs.fire_xy, obs.area, obs.share = (x, y), blob.area, blob.share
-    obs.blob_uv = (blob.u, blob.v)
-    if not field.in_bounds(cell):
-        obs.note = f"пятно за границей поля ({x:.2f}, {y:.2f}) м — не очаг"
+    spots = []
+    for blob in blobs:
+        x, y = anchor.to_map(blob.u, blob.v)
+        spots.append(Spot(blob.u, blob.v, x, y, blob.area, blob.share))
+    inside = [s for s in spots if field.in_bounds(field.m_to_cell(s.x, s.y))]
+    if not inside:
+        s = spots[0]
+        obs.fire_xy, obs.area, obs.share = (s.x, s.y), s.area, s.share
+        obs.blob_uv, obs.blobs_uv = (s.u, s.v), [(s.u, s.v)]
+        obs.note = f"пятно за границей поля ({s.x:.2f}, {s.y:.2f}) м — не очаг"
         return obs
-    obs.fire_cell = cell
+
+    unit_px = token_px(anchor.mpp, token_m, token_fill)
+    groups = [_group(g, unit_px, split_ratio) for g in clusters(inside, group_m)]
+    # Кучек может быть несколько: очаг один, а рядом мог оказаться посторонний
+    # красный предмет. Берём самую многочисленную, при равенстве — самую крупную.
+    best = max(groups, key=lambda g: (g.count, g.area))
+    obs.fire_xy = (best.x, best.y)
+    obs.blob_uv = anchor.to_pixel(best.x, best.y)
+    obs.blobs_uv = [(s.u, s.v) for s in best.spots]
+    obs.fire_count, obs.count_source = best.count, best.source
+    obs.spread_m, obs.area, obs.share = best.spread, best.area, best.share
+    obs.clipped = _clipped(best, bgr.shape, group_m / 2.0 / anchor.mpp if anchor.mpp > 0 else 0.0)
+    obs.fire_cell = field.m_to_cell(best.x, best.y)
+    notes = []
+    if len(groups) > 1:
+        notes.append(f"кучек огня в кадре {len(groups)}, взята самая многочисленная")
+    if obs.clipped:
+        notes.append("кучка у края кадра — число огоньков по нему считать ненадёжно")
+    obs.note = "; ".join(notes)
     return obs
 
 
@@ -381,10 +588,24 @@ class Scene:
     total: int = 0
     by_cell: dict[str, int] = dc_field(default_factory=dict)
     drones: list[str] = dc_field(default_factory=list)
+    level: int | None = None  # степень пожара = число огоньков; None — считать не вышло
+    level_votes: dict[str, int] = dc_field(default_factory=dict)  # «число огоньков»: кадров
+    clipped_only: bool = False  # кучку видели только краем кадра
+    count_note: str = ""
 
     @property
     def found(self) -> bool:
         return self.fire_cell is not None
+
+    @property
+    def sure(self) -> bool:
+        """Разведка сделала своё дело: клетка найдена И огоньки сосчитаны по целой кучке.
+
+        Именно этим, а не одним «найдено», решается, прекращать ли облёт: кадр, где
+        кучка упёрлась в край, говорит ГДЕ горит, но занижает СКОЛЬКО, а заниженный
+        уровень — это недовезённая вода.
+        """
+        return self.found and self.level is not None and not self.clipped_only
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -393,14 +614,24 @@ class Scene:
             "total": self.total,
             "by_cell": self.by_cell,
             "drones": self.drones,
+            "level": self.level,
+            "level_votes": self.level_votes,
+            "clipped_only": self.clipped_only,
+            "count_note": self.count_note,
         }
 
 
-def merge(observations: Iterable[Observation]) -> Scene:
+def merge(observations: Iterable[Observation], max_count: int = MAX_FIRE_COUNT) -> Scene:
     """Голосование по клетке; при равенстве голосов — где пятно крупнее.
 
     Крупнее — значит ближе: один и тот же «огонёк» на кадре с меньшей высоты и без
     угла занимает больше пикселей.
+
+    Степень пожара считается отдельно и только по кадрам, показавшим победившую
+    клетку. Кадры, где кучка упёрлась в край, в счёте не участвуют, пока есть хоть
+    один целый: обрезанная кучка занижает число, а заниженная степень — это недовезённая
+    вода и невыполненная миссия. Из оставшихся берётся самое частое число, при
+    равенстве — большее, по той же причине.
     """
     useful = [o for o in observations if o.found]
     scene = Scene(total=len(useful))
@@ -416,7 +647,33 @@ def merge(observations: Iterable[Observation]) -> Scene:
     scene.fire_cell = best
     scene.votes = votes[best]
     scene.by_cell = {f"{c[0]},{c[1]}": n for c, n in sorted(votes.items())}
-    scene.drones = [o.drone for o in useful if as_cell(o.fire_cell) == best]
+    same = [o for o in useful if as_cell(o.fire_cell) == best]
+    scene.drones = [o.drone for o in same]
+
+    counted = [o for o in same if o.fire_count > 0]
+    whole = [o for o in counted if not o.clipped]
+    all_clipped = not whole and bool(counted)
+    if all_clipped:
+        whole = counted
+    if not whole:
+        scene.count_note = "число огоньков не посчитано ни на одном кадре"
+        return scene
+    tally: dict[int, int] = {}
+    for o in whole:
+        tally[o.fire_count] = tally.get(o.fire_count, 0) + 1
+    level = max(tally, key=lambda n: (tally[n], n))
+    scene.level_votes = {str(n): k for n, k in sorted(tally.items())}
+    if level > max_count:
+        scene.count_note = (
+            f"насчитано огоньков {level}, а больше {max_count} на поле не бывает — "
+            "это ошибка распознавания, уровень остаётся из настроек"
+        )
+    elif all_clipped:
+        scene.level = level
+        scene.clipped_only = True
+        scene.count_note = "все кадры с кучкой у края — число огоньков может быть занижено"
+    else:
+        scene.level = level
     return scene
 
 
@@ -439,14 +696,16 @@ def draw(bgr, obs: Observation, field: Field, pads: dict[int, Cell], path: str) 
         cv2.putText(canvas, label, (int(m.u) - 40, int(m.v) - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, colour, 2)
     if obs.fire_xy is not None:
-        if obs.blob_uv is not None:
-            u, v = int(obs.blob_uv[0]), int(obs.blob_uv[1])
-            radius = max(12, int(math.sqrt(max(obs.area, 1.0) / math.pi)) + 8)
-            cv2.circle(canvas, (u, v), radius, (0, 0, 255), 3)
-            cv2.line(canvas, (u - radius, v), (u + radius, v), (0, 0, 255), 1)
-            cv2.line(canvas, (u, v - radius), (u, v + radius), (0, 0, 255), 1)
-        anchor_note = f"anchor={obs.anchor}"
-        text = f"fire {list(obs.fire_cell) if obs.fire_cell else '?'} {anchor_note}"
+        # Кружок вокруг КАЖДОГО жетона кучки: на техзащите по размеченному кадру
+        # должно быть видно не только «где горит», но и почему уровень такой.
+        one = max(12, int(math.sqrt(max(obs.area, 1.0) / max(obs.fire_count, 1) / math.pi)) + 8)
+        for spot in obs.blobs_uv or ([obs.blob_uv] if obs.blob_uv else []):
+            u, v = int(spot[0]), int(spot[1])
+            cv2.circle(canvas, (u, v), one, (0, 0, 255), 3)
+            cv2.line(canvas, (u - one, v), (u + one, v), (0, 0, 255), 1)
+            cv2.line(canvas, (u, v - one), (u, v + one), (0, 0, 255), 1)
+        count = f" x{obs.fire_count} ({obs.count_source})" if obs.fire_count else ""
+        text = f"fire {list(obs.fire_cell) if obs.fire_cell else '?'}{count} anchor={obs.anchor}"
         cv2.putText(canvas, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
     else:
         cv2.putText(canvas, obs.note or "no fire", (10, 30),
@@ -478,7 +737,16 @@ def settings(cfg) -> dict[str, Any]:
         "hsv_ranges": hsv,
         "min_area": float(cfg.get("vision.min_area_px", MIN_AREA_PX)),
         "max_share": float(cfg.get("vision.max_area_share", MAX_AREA_SHARE)),
+        "group_m": float(cfg.get("vision.fire_group_m", GROUP_M)),
+        "token_m": float(cfg.get("vision.token_m", TOKEN_M)),
+        "token_fill": float(cfg.get("vision.token_fill", TOKEN_FILL)),
+        "split_ratio": float(cfg.get("vision.split_ratio", SPLIT_RATIO)),
     }
+
+
+def max_count(cfg) -> int:
+    """Потолок числа огоньков: больше — считаем ошибкой распознавания."""
+    return int(cfg.get("vision.max_fire_count", MAX_FIRE_COUNT))
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -502,6 +770,12 @@ def main(argv: list[str] | None = None) -> int:
     pose = [float(v) for v in args.pose.split(",")] if args.pose else None
     obs = look(frame, field, pads, drone="файл", pose=pose, alt=args.alt, **settings(cfg))
     print(json.dumps(obs.to_dict(), ensure_ascii=False, indent=2))
+    if obs.found:
+        print(
+            f"очаг в клетке {list(obs.fire_cell)}: огоньков {obs.fire_count} "
+            f"(счёт по «{obs.count_source}», кучка {obs.spread_m:.2f} м) — "
+            f"столько же раз ехать за водой"
+        )
     if args.debug:
         print(f"размеченный кадр: {draw(frame, obs, field, pads, args.debug)}")
     return 0 if obs.found else 1
