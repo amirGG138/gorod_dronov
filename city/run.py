@@ -43,6 +43,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--llm", dest="llm", action="store_true", default=None)
     p.add_argument("--no-llm", dest="llm", action="store_false")
     p.add_argument(
+        "--llm-provider",
+        choices=("mock", "sverk"),
+        help="чем отвечает модель: mock — сама, без сети и ключа; sverk — живой шлюз",
+    )
+    p.add_argument("--llm-model", help="какую текстовую модель спрашивать, например qwen35")
+    p.add_argument(
         "--net",
         action="store_true",
         help="командовать аппаратами по сети (моками или живыми бортами); включает реальное время",
@@ -77,6 +83,10 @@ def apply_args(cfg, args) -> None:
             cfg.override(key, value)
     if args.net:
         cfg.override("robots.transport", "http")
+    if args.llm_provider:
+        cfg.override("llm.provider", args.llm_provider)
+    if args.llm_model:
+        cfg.override("llm.model", args.llm_model)
     if args.monitors:
         chosen = {name.strip() for name in args.monitors.split(",")}
         unknown = chosen - set(cfg.robots.monitors)

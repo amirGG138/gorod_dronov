@@ -7,6 +7,9 @@ from city.rules import (
     RouteBlocked,
     RuleSet,
     Scenario,
+    approach_options,
+    budget_for,
+    check_proposal,
     compile_plan,
     fire_route,
     plan_reasons,
@@ -133,6 +136,79 @@ class TestPlan(unittest.TestCase):
         back = Field.moves(f.astar(end, (3, 3)))
         self.assertEqual(total, moves + back + RULES.energy_reserve)
         self.assertIn("резерв", reason)
+
+
+class TestProposal(unittest.TestCase):
+    """Предложение LLM. Правила решают, а не модель: всё непроходное отбрасывается.
+
+    Каждый отказ обязан называть причину — она уходит в лог целиком и потом
+    показывается судьям как доказательство, что модель не в цепи управления.
+    """
+
+    def base_budget(self, spot=None):
+        return budget_for(field(), scenario(), spot, RULES)[0]
+
+    def check(self, **over):
+        proposal = {"approach": [3, 2], "charge_budget": self.base_budget((3, 2))}
+        proposal.update(over)
+        return check_proposal(field(), scenario(), proposal, RULES)
+
+    def test_options_start_with_the_deterministic_choice(self):
+        options = approach_options(field(), scenario())
+        self.assertEqual(options[0], field().approach((4, 2), (1, 3)))
+        self.assertNotIn((4, 2), options)  # сама клетка пожара вариантом не бывает
+
+    def test_valid_proposal_is_accepted(self):
+        verdict = self.check()
+        self.assertTrue(verdict.ok, verdict.reason)
+        self.assertEqual(verdict.spot, (3, 2))
+
+    def test_the_fire_cell_itself_is_refused(self):
+        verdict = self.check(approach=[4, 2])
+        self.assertFalse(verdict.ok)
+        self.assertIn("въезжать нельзя", verdict.reason)
+
+    def test_a_building_is_refused(self):
+        verdict = self.check(approach=[4, 1])  # дом из BUILDINGS
+        self.assertFalse(verdict.ok)
+        self.assertIn("здание", verdict.reason)
+
+    def test_a_far_away_cell_is_refused(self):
+        verdict = self.check(approach=[0, 0])
+        self.assertFalse(verdict.ok)
+        self.assertIn("не соседняя", verdict.reason)
+
+    def test_too_small_budget_is_refused(self):
+        verdict = self.check(charge_budget=1)
+        self.assertFalse(verdict.ok)
+        self.assertIn("встанет на полпути", verdict.reason)
+
+    def test_wasteful_budget_is_refused(self):
+        """Единица заряда это секунда стоянки, а попытка длится 15 минут."""
+        verdict = self.check(charge_budget=self.base_budget((3, 2)) * 3)
+        self.assertFalse(verdict.ok)
+        self.assertIn("удвоенного", verdict.reason)
+
+    def test_small_extra_budget_is_allowed(self):
+        self.assertTrue(self.check(charge_budget=self.base_budget((3, 2)) + 2).ok)
+
+    def test_garbage_answers_do_not_crash(self):
+        for junk in ("не объект", None, [1, 2], {"approach": "рядом", "charge_budget": 5}):
+            verdict = check_proposal(field(), scenario(), junk, RULES)
+            self.assertFalse(verdict.ok)
+            self.assertTrue(verdict.reason)
+
+    def test_non_numeric_budget_is_refused(self):
+        verdict = self.check(charge_budget="много")
+        self.assertFalse(verdict.ok)
+        self.assertIn("неразборчиво", verdict.reason)
+
+    def test_chosen_spot_changes_the_route(self):
+        """Принятая клетка действительно меняет план, иначе выбор был бы декорацией."""
+        actions, _, end = compile_plan(field(), scenario(), RULES, spot=(4, 3))
+        self.assertEqual(end, (4, 3))
+        for action in actions:
+            self.assertNotIn((4, 2), action.path)
 
 
 if __name__ == "__main__":

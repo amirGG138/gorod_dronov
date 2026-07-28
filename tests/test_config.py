@@ -42,6 +42,11 @@ class TestMiniYaml(unittest.TestCase):
         with self.assertRaises(ConfigError):
             parse_mini_yaml("pads:\n  - [1, 1]\n  - [4, 4]\n")
 
+    def test_url_with_a_colon_stays_whole(self):
+        """Адрес шлюза содержит «:» — разделитель ключа берётся только первый."""
+        data = parse_mini_yaml("llm:\n  base: https://ai.sverk.tech/v1\n")
+        self.assertEqual(data["llm"]["base"], "https://ai.sverk.tech/v1")
+
 
 class TestConfigAccess(unittest.TestCase):
     def setUp(self):
@@ -65,6 +70,15 @@ class TestConfigAccess(unittest.TestCase):
         self.assertEqual(self.cfg.field.cell, 0.8)
         self.assertEqual(list(self.cfg.field.size), [6, 6])
         self.assertFalse(self.cfg.get("flags.use_vup"))  # микродрона у нас нет
+
+    def test_llm_section_is_readable(self):
+        # По умолчанию модель отвечает без сети: на площадке ключа может не быть,
+        # и система обязана работать, а не молча притворяться.
+        self.assertEqual(self.cfg.get("llm.provider"), "mock")
+        self.assertEqual(self.cfg.get("llm.base"), "https://ai.sverk.tech/v1")
+        self.assertEqual(self.cfg.get("llm.key_env"), "SVERK_API_KEY")
+        self.assertEqual(self.cfg.get("llm.timeout"), 30)
+        self.assertFalse(self.cfg.get("flags.use_llm"))  # включается ключом --llm
 
     def test_pads_match_our_field_map(self):
         # docs/field-map/map.txt: id 50/60/62/7, сторона 0,25 м, DICT_4X4_1000

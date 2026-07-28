@@ -20,7 +20,7 @@ docs/openclaw/02-regulyament-v-kode.md — потому что и там, и з�
 from __future__ import annotations
 
 from dataclasses import dataclass, field as dc_field
-from typing import Iterable, Sequence
+from typing import Any, Iterable, Sequence
 
 from .field import Cell, Field, as_cell
 
@@ -170,16 +170,20 @@ def fire_route(
     level: int,
     tower: Sequence[int],
     rules: RuleSet = DEFAULT_RULES,
+    spot: Sequence[int] | None = None,
 ) -> Route:
     """Ровно `level` подтверждённых циклов «башня -> 3 с с лентой -> подъезд к пожару».
 
     В клетку пожара ровер не въезжает никогда: пожар горит в доме. Точка тушения —
     соседняя клетка-дорога, ближайшая к башне.
+
+    `spot` задаёт эту клетку явно. Так сюда попадает предложение LLM — но только
+    после того, как его пропустил `check_proposal`: сам маршрут ничего не проверяет.
     """
     start, fire, tower = as_cell(start), as_cell(fire), as_cell(tower)
     if level < 1:
         raise RouteBlocked("уровень пожара меньше единицы — тушить нечего")
-    spot = field.approach(fire, tower)
+    spot = as_cell(spot) if spot is not None else field.approach(fire, tower)
     if spot is None:
         raise RouteBlocked(f"к пожару {fire} не подъехать: все соседние клетки заняты")
 
@@ -291,10 +295,117 @@ def compile_plan(
     field: Field,
     sc: Scenario,
     rules: RuleSet = DEFAULT_RULES,
+    spot: Sequence[int] | None = None,
 ) -> tuple[list[Action], int, Cell]:
     """Собрать список действий попытки с реальной стартовой клетки ровера."""
-    route = fire_route(field, sc.rover_start, sc.fire_cell, sc.fire_level, sc.tower, rules)
+    route = fire_route(
+        field, sc.rover_start, sc.fire_cell, sc.fire_level, sc.tower, rules, spot=spot
+    )
     return route.actions, route.moves, route.end
+
+
+def approach_options(field: Field, sc: Scenario) -> list[Cell]:
+    """Все клетки, с которых можно тушить, в порядке выгодности.
+
+    Первая — та же, что выберет `field.approach`: ближайшая к башне. Список
+    отдаётся модели как закрытый набор вариантов, чтобы «предложить клетку» не
+    означало «предложить что угодно».
+    """
+    out: list[tuple[int, Cell]] = []
+    for cand in field.neighbors(sc.fire_cell):
+        to_fire = field.astar(sc.tower, cand)
+        from_start = field.astar(sc.rover_start, cand)
+        if to_fire is None or from_start is None:
+            continue
+        out.append((Field.moves(to_fire), cand))
+    out.sort()
+    return [cell for _, cell in out]
+
+
+def budget_for(
+    field: Field,
+    sc: Scenario,
+    spot: Sequence[int] | None = None,
+    rules: RuleSet = DEFAULT_RULES,
+) -> tuple[int, str]:
+    """Сколько заряда нужно на весь план, если тушить с клетки `spot`."""
+    _, moves, end = compile_plan(field, sc, rules, spot=spot)
+    return plan_total_energy(field, sc, moves, end, rules)
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """Приговор предложению модели: что принято и почему."""
+
+    ok: bool
+    reason: str
+    spot: Cell | None = None
+    budget: int = 0
+
+
+def check_proposal(
+    field: Field,
+    sc: Scenario,
+    proposal: Any,
+    rules: RuleSet = DEFAULT_RULES,
+) -> Verdict:
+    """Единственное место, где решается, слушать ли модель.
+
+    Проверяется не правдоподобие ответа, а выполнимость: клетка обязана быть из
+    списка вариантов, бюджет — покрывать план и не транжирить время попытки
+    (единица заряда это секунда стоянки, а вся попытка 15 минут). Всё, что не
+    прошло, отбрасывается с причиной: она уходит в лог целиком.
+    """
+    if not isinstance(proposal, dict):
+        return Verdict(False, "ответ модели не является объектом JSON")
+    raw_cell = proposal.get("approach")
+    try:
+        spot = as_cell(raw_cell)
+    except (TypeError, ValueError):
+        return Verdict(False, f"клетка подъезда записана неразборчиво: {raw_cell!r}")
+
+    options = approach_options(field, sc)
+    if not options:
+        return Verdict(False, f"к пожару {list(sc.fire_cell)} не подъехать ниоткуда")
+    if spot not in options:
+        if spot == as_cell(sc.fire_cell):
+            why = "это сама клетка пожара, в неё въезжать нельзя"
+        elif not field.is_road(spot):
+            why = "это здание или клетка за полем"
+        elif spot not in field.neighbors(sc.fire_cell):
+            why = "она не соседняя с пожаром"
+        else:
+            why = "до неё нет маршрута"
+        return Verdict(
+            False,
+            f"клетка подъезда {list(spot)} отклонена: {why}. "
+            f"Допустимые: {[list(c) for c in options]}",
+        )
+
+    base, _ = budget_for(field, sc, spot, rules)
+    try:
+        budget = int(proposal.get("charge_budget"))
+    except (TypeError, ValueError):
+        return Verdict(False, f"бюджет заряда записан неразборчиво: {proposal.get('charge_budget')!r}")
+    if budget < base:
+        return Verdict(
+            False,
+            f"бюджет заряда {budget} ед. меньше необходимых {base} — "
+            "ровер встанет на полпути",
+        )
+    if budget > 2 * base:
+        return Verdict(
+            False,
+            f"бюджет заряда {budget} ед. больше удвоенного расчётного {2 * base}: "
+            "лишняя единица это лишняя секунда стоянки, а попытка длится 15 минут",
+        )
+    return Verdict(
+        True,
+        f"клетка подъезда {list(spot)} допустима, бюджет {budget} ед. покрывает план "
+        f"(минимум {base})",
+        spot=spot,
+        budget=budget,
+    )
 
 
 def plan_total_energy(

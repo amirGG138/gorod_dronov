@@ -15,6 +15,7 @@ import sys
 from typing import Any, Sequence
 
 from . import vision
+from .brain import Brain
 from .field import Cell, Field, as_cell
 from .log import Log
 from .robots.base import RobotError
@@ -24,6 +25,9 @@ from .rules import (
     RouteBlocked,
     RuleSet,
     Scenario,
+    approach_options,
+    budget_for,
+    check_proposal,
     compile_plan,
     dwell_valid,
     plan_reasons,
@@ -68,6 +72,11 @@ class Dispatcher:
         # Мониторы, чья посадка не подтвердилась: попадают в лог разведки, чтобы
         # «сел» на пульте не расходилось с тем, что видно глазами над полем.
         self.unverified: list[str] = []
+        # Модель. Создаётся всегда, работает только при flags.use_llm и никогда не
+        # находится в цепи управления: её предложения проходят через rules.py.
+        self.brain = Brain(cfg)
+        # Кадр, на котором лучше всего видно очаг: его же показываем VLM.
+        self.fire_shot: str = ""
 
     # --- шаги попытки -------------------------------------------------------
 
@@ -88,17 +97,34 @@ class Dispatcher:
             self.connect()
             self.survey()
             reasons = plan_reasons(self.field, self.sc, self.rules)
-            self.log.ev(
-                "PLAN_CHOSEN",
-                mission="fire",
-                reasons=reasons,
-                reason="; ".join(reasons),
+            advice = self.advise_plan()
+            spot = advice.spot if advice else None
+            fields: dict[str, Any] = {"reasons": reasons, "reason": "; ".join(reasons)}
+            llm_reason = self.explain(
+                "выбор плана тушения",
+                {
+                    "fire": list(self.sc.fire_cell),
+                    "level": self.sc.fire_level,
+                    "tower": list(self.sc.tower),
+                    "approach": list(spot) if spot else None,
+                    "правила": reasons,
+                },
             )
+            if llm_reason:
+                fields["llm_reason"] = llm_reason
+            self.log.ev("PLAN_CHOSEN", mission="fire", **fields)
 
-            actions, moves, end = compile_plan(self.field, self.sc, self.rules)
+            actions, moves, end = compile_plan(self.field, self.sc, self.rules, spot=spot)
             budget, budget_reason = plan_total_energy(
                 self.field, self.sc, moves, end, self.rules
             )
+            if advice and advice.budget > budget:
+                # Модель вправе взять запас БОЛЬШЕ расчётного — это её единственная
+                # свобода в бюджете, и она уже ограничена сверху в check_proposal.
+                budget_reason += (
+                    f"; по предложению модели бюджет поднят до {advice.budget} ед."
+                )
+                budget = advice.budget
             self.log.ev(
                 "PLAN",
                 actions=len(actions),
@@ -133,13 +159,24 @@ class Dispatcher:
             raise  # трассировка нужна: это наша ошибка, и её надо увидеть целиком
 
         ok = "fire" in self.done_missions
-        self.log.ev(
-            "DONE",
-            missions=self.done_missions,
-            energy_spent=self.energy.spent,
-            energy_left=self.energy.energy,
-            reason="попытка завершена" if ok else "попытка завершена не полностью",
+        done: dict[str, Any] = {
+            "missions": self.done_missions,
+            "energy_spent": self.energy.spent,
+            "energy_left": self.energy.energy,
+            "reason": "попытка завершена" if ok else "попытка завершена не полностью",
+        }
+        summary = self.explain(
+            "итог попытки",
+            {
+                "missions": self.done_missions,
+                "fire_done": self.fire_done,
+                "energy_spent": self.energy.spent,
+                "energy_left": self.energy.energy,
+            },
         )
+        if summary:
+            done["llm_reason"] = summary
+        self.log.ev("DONE", **done)
         return 0 if ok else 1
 
     def emergency_stop(self, why: str) -> list[dict[str, Any]]:
@@ -171,6 +208,117 @@ class Dispatcher:
                 flush=True,
             )
         return report
+
+    # --- модель --------------------------------------------------------------
+
+    def _llm(self, ans, accepted: bool | None = None, reason: str = "") -> None:
+        """Записать обращение к модели. Пишется и удача, и отказ, и отклонённый ответ.
+
+        Без этой записи нельзя ответить судье на вопрос «а работала ли у вас модель
+        в этом прогоне» — и нельзя отличить рабочий шлюз от молчащего, который
+        подменяется детерминированным путём (та самая ловушка «демо есть, LLM нет»).
+        """
+        if not reason:
+            reason = (ans.text or "модель ответила") if ans.ok else ans.error
+        self.log.ev(
+            "LLM",
+            use=ans.use,
+            model=ans.model,
+            ok=ans.ok,
+            ms=ans.ms,
+            accepted=accepted,
+            answer=ans.data or None,
+            reason=reason,
+        )
+
+    def advise_plan(self):
+        """Спросить модель про план и пропустить ответ через правила.
+
+        Возвращает приговор `rules.check_proposal`, если он положительный, иначе
+        None — и тогда план строится детерминированно, как без модели вовсе.
+        """
+        if not self.brain.wants("plan"):
+            return None
+        options = approach_options(self.field, self.sc)
+        base, base_reason = budget_for(
+            self.field, self.sc, options[0] if options else None, self.rules
+        )
+        facts = {
+            "field": [self.field.cols, self.field.rows],
+            "fire": list(self.sc.fire_cell),
+            "level": self.sc.fire_level,
+            "tower": list(self.sc.tower),
+            "charge": list(self.sc.charge),
+            "rover_start": list(self.sc.rover_start),
+            "candidates": [list(c) for c in options],
+            "base_budget": base,
+            "base_budget_reason": base_reason,
+        }
+        ans = self.brain.advise_plan(facts)
+        if not ans.ok:
+            self._llm(ans)
+            return None
+        verdict = check_proposal(self.field, self.sc, ans.data, self.rules)
+        self._llm(
+            ans,
+            accepted=verdict.ok,
+            reason=(
+                f"{verdict.reason}. Модель объясняет так: {ans.text}"
+                if verdict.ok
+                else f"{verdict.reason}. Работаем по детерминированному плану"
+            ),
+        )
+        return verdict if verdict.ok else None
+
+    def explain(self, topic: str, facts: dict) -> str:
+        """Объяснение решения по-русски для лога. Пусто — значит модель промолчала."""
+        if not self.brain.wants("explain"):
+            return ""
+        ans = self.brain.explain(topic, facts)
+        self._llm(ans)
+        return ans.text if ans.ok else ""
+
+    def _look_with_vlm(self, what: str):
+        """Показать модели лучший кадр разведки. None — показывать нечего или нечем."""
+        if not self.brain.wants("see") or not self.fire_shot:
+            return None
+        try:
+            with open(self.fire_shot, "rb") as fh:
+                frame = fh.read()
+        except OSError as exc:
+            self.log.ev("ERROR", error="OSError", reason=f"кадр {self.fire_shot} не прочитать: {exc}")
+            return None
+        return (
+            self.brain.see_person(frame, self.sc.fire_cell)
+            if what == "person"
+            else self.brain.see_fire(frame)
+        )
+
+    def confirm_fire(self, scene) -> None:
+        """Спросить VLM, виден ли очаг, когда зрение не уверено.
+
+        Ответ НЕ переопределяет клетку: её считает vision.py по геометрии кадра, а
+        модель геометрию не знает. Это второе мнение в лог, а не источник истины.
+        """
+        if not self.brain.confirm_fire or not self.brain.wants("see"):
+            return
+        if scene.found and scene.votes > 1:
+            return  # два и больше согласных кадров — спрашивать не о чем
+        ans = self._look_with_vlm("fire")
+        if ans is None:
+            return
+        agree = bool(ans.data.get("fire")) if ans.ok else None
+        self._llm(
+            ans,
+            accepted=agree,
+            reason=(
+                f"второе мнение по кадру: очаг {'подтверждён' if agree else 'не подтверждён'} "
+                f"(уверенность {ans.data.get('confidence')}). Клетку всё равно считает "
+                f"зрение по геометрии кадра: {ans.data.get('note') or '—'}"
+                if ans.ok
+                else ans.error
+            ),
+        )
 
     def connect(self) -> None:
         """Перекличка бортов до старта: кто ответил, где стоит и не заглушка ли он."""
@@ -251,7 +399,25 @@ class Dispatcher:
                     break
             scene = vision.merge(seen, self.max_fire_count)
 
+        self.fire_shot = self._best_shot(seen, scene)
         self._apply_scene(scene, len(seen))
+        self.confirm_fire(scene)
+
+    def _best_shot(self, seen: Sequence[vision.Observation], scene) -> str:
+        """Кадр для VLM: тот, где очаг виден крупнее всего.
+
+        Крупнее — значит снят ближе, и человека в окне на нём тоже видно лучше.
+        Если очага не нашли вовсе, берётся последний снятый кадр: показать модели
+        нечего более осмысленного, а второе мнение по нему всё равно полезно.
+        """
+        useful = [o for o in seen if o.shot]
+        if not useful:
+            return ""
+        if scene.found:
+            same = [o for o in useful if o.found and as_cell(o.fire_cell) == scene.fire_cell]
+            if same:
+                return max(same, key=lambda o: o.area).shot
+        return useful[-1].shot
 
     def _stop_when_found(self) -> bool:
         return bool(self.cfg.get("survey.stop_when_found", True))
@@ -686,10 +852,12 @@ class Dispatcher:
                 mission="fire",
                 missing=["person_detection_in_window"],
                 reason=(
-                    "человека в окне искать нечем: ВУП отсутствует, а разбор кадра "
-                    "монитора появится на этапах 3 и 7"
+                    "человека в окне искать нечем: ВУП отсутствует. Пробуем частичную "
+                    "замену — разбор кадра дрона-монитора моделью VLM (PLAN.md, "
+                    "«Чего у нас нет на руках»)"
                 ),
             )
+            self._person_by_monitor()
             return
         vup = self.fleet.vup
         vup.takeoff(VUP_ALT)
@@ -708,5 +876,36 @@ class Dispatcher:
             reason=(
                 "кадр окна снят, но детектора ещё нет (этапы 3 и 7): "
                 "результат не выдумываем"
+            ),
+        )
+
+    def _person_by_monitor(self) -> None:
+        """Частичная замена ВУП: спросить VLM про человека на кадре монитора.
+
+        Надёжность заведомо ниже, чем у ВУП: окно вертикальное, а монитор снимает
+        сверху. Поэтому источник и модель пишутся в лог прямо — судья должен видеть,
+        чем именно получена детекция, а не только её результат.
+        """
+        ans = self._look_with_vlm("person")
+        if ans is None:
+            return
+        found = bool(ans.data.get("person")) if ans.ok else None
+        self._llm(ans, accepted=found)
+        self.log.ev(
+            "PERSON_FOUND",
+            found=found,
+            source="monitor",
+            model=ans.model,
+            confidence=ans.data.get("confidence") if ans.ok else None,
+            cell=list(self.sc.fire_cell),
+            shot=self.fire_shot,
+            reason=(
+                (
+                    f"на кадре монитора {'виден человек' if found else 'человека не видно'} "
+                    f"(уверенность {ans.data.get('confidence')}): {ans.data.get('note') or '—'}. "
+                    "Съёмка сверху, окно вертикальное — надёжность ниже, чем у ВУП"
+                )
+                if ans.ok
+                else f"модель кадр не разобрала: {ans.error}. Результат не выдумываем"
             ),
         )

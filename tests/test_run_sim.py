@@ -1,7 +1,9 @@
 import json
 import tempfile
 import unittest
+from unittest import mock
 
+from city import brain as brain_mod
 from city import config as config_mod
 from city.clock import SimClock
 from city.dispatcher import Dispatcher
@@ -177,6 +179,67 @@ class TestSurveyByPictures(unittest.TestCase):
         self.assertEqual(code, 0)
         for scan in [e for e in events if e["type"] == "SCAN"]:
             self.assertTrue(scan["shot"].endswith(".jpg"), scan)
+
+
+class TestLlm(unittest.TestCase):
+    """Модель советует, правила решают. Проверяется именно это разделение."""
+
+    def actions(self, events):
+        """Последовательность действий попытки — то, что модель менять не вправе."""
+        return [
+            (e["type"], e.get("cell"), e.get("units"))
+            for e in events
+            if e["type"] in ("MOVE", "DWELL", "CHARGED", "FIRE_CYCLE", "FIRE_EXTINGUISHED")
+        ]
+
+    def test_plan_is_the_same_with_and_without_the_model(self):
+        code_on, on = run_and_read(["--sim", "--llm"])
+        code_off, off = run_and_read(["--sim", "--no-llm"])
+        self.assertEqual((code_on, code_off), (0, 0))
+        self.assertEqual(self.actions(on), self.actions(off))
+
+    def test_the_log_shows_that_the_model_worked(self):
+        _, on = run_and_read(["--sim", "--llm"])
+        calls = [e for e in on if e["type"] == "LLM"]
+        self.assertTrue(calls)
+        self.assertTrue(all(e.get("reason") for e in calls), calls)
+        self.assertIn("plan", [e["use"] for e in calls])
+        # Провайдер обязан быть назван: иначе не отличить живую модель от заглушки.
+        self.assertTrue(all(e.get("model") for e in calls))
+
+    def test_without_the_flag_the_model_is_not_called(self):
+        _, off = run_and_read(["--sim", "--no-llm"])
+        self.assertFalse([e for e in off if e["type"] == "LLM"])
+
+    def test_missing_key_does_not_break_the_run(self):
+        """Живой шлюз без ключа: попытка проходит целиком, отказ виден в логе."""
+        # Пустой ключ, даже если на машине выставлен настоящий: проверяем отказ.
+        with mock.patch.dict("os.environ", {"SVERK_API_KEY": ""}):
+            code, events = run_and_read(["--sim", "--llm", "--llm-provider", "sverk"])
+        self.assertEqual(code, 0)
+        calls = [e for e in events if e["type"] == "LLM"]
+        self.assertTrue(calls)
+        self.assertFalse(any(e["ok"] for e in calls))
+        self.assertTrue(any("ключа" in e["reason"] for e in calls))
+        self.assertTrue([e for e in events if e["type"] == "FIRE_EXTINGUISHED"])
+
+    def test_a_bad_proposal_is_rejected_and_logged(self):
+        """Модель зовёт въехать в горящую клетку — план от этого не меняется."""
+        bad = brain_mod.Answer(
+            use="plan",
+            model="mock",
+            ok=True,
+            data={"approach": [4, 2], "charge_budget": 14, "reason": "поеду в огонь"},
+            text="поеду в огонь",
+        )
+        with mock.patch.object(brain_mod.Brain, "advise_plan", return_value=bad):
+            code, events = run_and_read(["--sim", "--llm"])
+        _, plain = run_and_read(["--sim", "--no-llm"])
+        self.assertEqual(code, 0)
+        verdict = next(e for e in events if e["type"] == "LLM" and e["use"] == "plan")
+        self.assertFalse(verdict["accepted"])
+        self.assertIn("въезжать нельзя", verdict["reason"])
+        self.assertEqual(self.actions(events), self.actions(plain))
 
 
 class TestEnergyBlock(unittest.TestCase):
