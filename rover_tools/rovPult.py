@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Пульт РОВЕРА: короткие команды вместо веб-морды и curl.
 
-    python3 rovPult.py --ip 192.168.1.125
+    python3 rover_tools/rovPult.py --ip 192.168.1.125
 
 Наземный инструмент оператора, а не часть зачётной попытки: в попытке роверу
 командует диспетчер (`python3 -m city.run`) через `onboard/rover_agent.py`.
@@ -52,7 +52,8 @@ import time
 import urllib.error
 import urllib.request
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "onboard"))
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # инструмент лежит в rover_tools/
+sys.path.insert(0, os.path.join(_ROOT, "onboard"))
 from rover_agent import (  # noqa: E402  — путь дописан выше
     ControlApiBackend, RoverLinkError, RoverRefused, _http as http_json,
 )

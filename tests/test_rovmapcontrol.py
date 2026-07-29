@@ -16,7 +16,7 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _spec = importlib.util.spec_from_file_location(
-    "rovMapControl", os.path.join(ROOT, "rovMapControl.py")
+    "rovMapControl", os.path.join(ROOT, "rover_tools", "rovMapControl.py")
 )
 rmc = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(rmc)

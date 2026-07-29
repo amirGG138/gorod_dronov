@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """РОВЕР: строим карту лидаром, пока ровер катают руками, и ездим по этой карте.
 
-    python3 rovMapControl.py --ip 192.168.1.125
+    python3 rover_tools/rovMapControl.py --ip 192.168.1.125
 
 Наземный инструмент оператора: работает на ноутбуке, на борт ничего не кладёт,
 разговаривает с ровером только по HTTP (`rover_web` :8765). Карта строится У НАС,
@@ -75,7 +75,8 @@ import threading
 import time
 import zlib
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "onboard"))
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # инструмент лежит в rover_tools/
+sys.path.insert(0, os.path.join(_ROOT, "onboard"))
 from rover_agent import RoverLinkError, _http as http_json  # noqa: E402 — путь выше
 
 if hasattr(sys.stdout, "reconfigure"):  # кириллица в консоли Windows

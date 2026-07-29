@@ -10,19 +10,19 @@
 1. Сам себе стенд (по умолчанию) — скрипт запускает rover_agent.py --dry на
    свободном порту, гоняет ВСЕ проверки, включая переезд, и глушит агента:
 
-       python3 rover_check/check_rover.py
+       python3 rover_tools/check_rover.py
 
 2. По уже запущенному агенту — например по тому, что смотрит на живой ровер.
    Движение при этом НЕ выполняется (ровер поедет по-настоящему), пока не
    попросишь явно ключом --move:
 
-       python3 rover_check/check_rover.py --url http://127.0.0.1:8010
-       python3 rover_check/check_rover.py --url http://127.0.0.1:8010 --move
+       python3 rover_tools/check_rover.py --url http://127.0.0.1:8010
+       python3 rover_tools/check_rover.py --url http://127.0.0.1:8010 --move
 
 3. Плюс железо мимо агента — два GET прямо в родные API ровера, чтобы отделить
    «агент виноват» от «ровер молчит»:
 
-       python3 rover_check/check_rover.py --url http://127.0.0.1:8010 --rover-ip 192.168.1.125
+       python3 rover_tools/check_rover.py --url http://127.0.0.1:8010 --rover-ip 192.168.1.125
 
 Код возврата: 0 — все проверки прошли, 1 — есть провалы. Нужна только стандартная
 библиотека.

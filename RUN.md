@@ -455,7 +455,7 @@ curl http://127.0.0.1:8010/status                              # ждём "cell"
 скоростями через `rover_web`. Ни Nav2, ни `/scan_filtered` для этого не нужны.
 
 ```bash
-python3 rovMapControl.py --ip АДРЕС
+python3 rover_tools/rovMapControl.py --ip АДРЕС
 ```
 
 Порядок: `к` — начать сбор, дальше катать ровер (`р` — руль с клавиатуры, WASD; можно и
