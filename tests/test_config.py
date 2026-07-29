@@ -77,7 +77,11 @@ class TestConfigAccess(unittest.TestCase):
         self.assertEqual(self.cfg.get("llm.provider"), "mock")
         self.assertEqual(self.cfg.get("llm.base"), "https://ai.sverk.tech/v1")
         self.assertEqual(self.cfg.get("llm.key_env"), "SVERK_API_KEY")
-        self.assertEqual(self.cfg.get("llm.timeout"), 30)
+        # Таймаут с запасом на зрение: живой VLM смотрел на кадр 17-22 с (29.07.2026).
+        self.assertEqual(self.cfg.get("llm.timeout"), 40)
+        # Модели ограничены нашим ключом: qwen35 из docs/openclaw ему закрыт (403).
+        self.assertEqual(self.cfg.get("llm.model"), "deepseek-v4-pro")
+        self.assertEqual(self.cfg.get("llm.vlm_model"), "gemma4-vlm")
         self.assertFalse(self.cfg.get("flags.use_llm"))  # включается ключом --llm
 
     def test_pads_match_our_field_map(self):

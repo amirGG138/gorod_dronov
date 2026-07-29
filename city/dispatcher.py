@@ -96,9 +96,12 @@ class Dispatcher:
         try:
             self.connect()
             self.survey()
-            reasons = plan_reasons(self.field, self.sc, self.rules)
+            # Сначала спрашиваем модель, потом объясняем план: обоснование обязано
+            # называть ту клетку, на которую план и построен, иначе лог решений
+            # расходится с делом.
             advice = self.advise_plan()
             spot = advice.spot if advice else None
+            reasons = plan_reasons(self.field, self.sc, self.rules, spot=spot)
             fields: dict[str, Any] = {"reasons": reasons, "reason": "; ".join(reasons)}
             llm_reason = self.explain(
                 "выбор плана тушения",

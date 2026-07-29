@@ -111,6 +111,16 @@ class TestPlanReasons(unittest.TestCase):
         spot = field().approach((4, 2), (1, 3))
         self.assertTrue(any(str(list(spot)) in r for r in reasons))
 
+    def test_approach_from_the_model_is_the_one_explained(self):
+        """Судье называется та клетка, на которую построен план, а не запасная."""
+        default = field().approach((4, 2), (1, 3))
+        other = next(c for c in approach_options(field(), scenario()) if c != default)
+        reasons = plan_reasons(field(), scenario(), RULES, spot=other)
+        text = " ".join(reasons)
+        self.assertIn(str(list(other)), text)
+        self.assertNotIn(str(list(default)), text)
+        self.assertIn("модель", text)
+
     def test_unreachable_fire_is_reported(self):
         # горящий дом заперт домами со всех сторон: подъезжать некуда
         f = Field(size=(6, 6), cell=0.8, buildings=[(2, 2), (1, 2), (3, 2), (2, 1), (2, 3)])
