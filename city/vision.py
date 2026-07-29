@@ -475,6 +475,9 @@ class Observation:
     anchor: str = "none"  # markers | marker | pose | none
     marker_id: int | None = None
     markers_seen: list[int] = dc_field(default_factory=list)
+    # Клетки поля, попавшие в этот кадр. Не «где горит», а «где мы вообще смотрели»:
+    # без этого списка «очага не видно» неотличимо от «туда никто не смотрел» (этап 8).
+    seen_cells: list[Cell] = dc_field(default_factory=list)
     shot: str = ""
     note: str = ""
 
@@ -496,6 +499,7 @@ class Observation:
             "anchor": self.anchor,
             "marker_id": self.marker_id,
             "markers_seen": self.markers_seen,
+            "seen_cells": [list(c) for c in self.seen_cells],
             "shot": self.shot,
             "note": self.note,
         }
@@ -508,6 +512,25 @@ def decode(data: bytes):
     if frame is None or frame.size == 0:
         raise VisionError("кадр не распаковать: пришли не картинка или обрезанный JPEG")
     return frame
+
+
+def cells_in_frame(anchor: Anchor, field: Field, shape: Sequence[int]) -> list[Cell]:
+    """Какие клетки поля попали в этот кадр.
+
+    Считается обратным переводом: центр каждой клетки переводится в пиксель и
+    проверяется, лежит ли он внутри кадра. Так учитывается и поворот кадра
+    относительно поля, чего не дала бы прикидка «прямоугольник вокруг кадра».
+
+    Клетка засчитывается по своему ЦЕНТРУ: попавший в кадр краешек клетки ничего
+    не говорит о том, лежит ли на ней огонёк.
+    """
+    height, width = int(shape[0]), int(shape[1])
+    out = []
+    for cell in field.cells():
+        u, v = anchor.to_pixel(*field.cell_to_m(cell))
+        if 0 <= u < width and 0 <= v < height:
+            out.append(cell)
+    return out
 
 
 def look(
@@ -538,6 +561,7 @@ def look(
         obs.note = "ни одной известной метки в кадре и неизвестно, откуда снимали"
         return obs
     obs.anchor, obs.marker_id = anchor.source, anchor.marker_id
+    obs.seen_cells = cells_in_frame(anchor, field, bgr.shape)
 
     blobs = find_fires(bgr, hsv_ranges, min_area, max_share)
     if not blobs:

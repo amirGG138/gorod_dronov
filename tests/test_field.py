@@ -40,6 +40,45 @@ class TestGeometry(unittest.TestCase):
         self.assertAlmostEqual(y, 0.7)
 
 
+class TestQuarters(unittest.TestCase):
+    """Четверти поля: доля поля, за которую отвечает один дрон-монитор (этап 8)."""
+
+    def setUp(self):
+        self.f = Field(size=(6, 6), cell=0.8)
+
+    def test_each_pad_sits_in_its_own_quarter(self):
+        pads = [(1, 1), (4, 1), (1, 4), (4, 4)]
+        quarters = {self.f.quadrant(pad) for pad in pads}
+        self.assertEqual(len(quarters), 4, "площадки обязаны стоять в разных четвертях")
+
+    def test_a_quarter_is_a_three_by_three_block(self):
+        cells = self.f.quadrant_cells(self.f.quadrant((1, 1)))
+        self.assertEqual(len(cells), 9)
+        self.assertIn((0, 0), cells)
+        self.assertIn((2, 2), cells)
+        self.assertNotIn((3, 0), cells)
+
+    def test_four_quarters_cover_the_field_without_overlap(self):
+        seen = []
+        for quad in {self.f.quadrant(c) for c in self.f.cells()}:
+            seen.extend(self.f.quadrant_cells(quad))
+        self.assertEqual(len(seen), 36)
+        self.assertEqual(sorted(set(seen)), sorted(self.f.cells()))
+
+    def test_the_pad_is_the_centre_of_its_quarter(self):
+        """Дрон висит над серединой своей четверти — иначе край в кадр не влезет."""
+        for pad in ((1, 1), (4, 1), (1, 4), (4, 4)):
+            cells = self.f.quadrant_cells(self.f.quadrant(pad))
+            cols = sorted({c[0] for c in cells})
+            rows = sorted({c[1] for c in cells})
+            self.assertEqual(pad[0], cols[len(cols) // 2])
+            self.assertEqual(pad[1], rows[len(rows) // 2])
+
+    def test_quarters_have_russian_names(self):
+        self.assertEqual(self.f.quadrant_name(self.f.quadrant((1, 1))), "ближняя левая")
+        self.assertEqual(self.f.quadrant_name(self.f.quadrant((4, 4))), "дальняя правая")
+
+
 class TestRouting(unittest.TestCase):
     def setUp(self):
         # Реальная гипотеза поля: четыре пада-крыши + три дома без маркеров

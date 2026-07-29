@@ -56,6 +56,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--monitors", help="какие дроны участвуют, например m1 или m1,m3")
     p.add_argument("--rover-url", help="адрес ровера, например http://192.168.1.50:8010")
     p.add_argument("--drone-url", help="адрес первого дрона-монитора (m1)")
+    p.add_argument(
+        "--monitor-url",
+        action="append",
+        metavar="ИМЯ=АДРЕС",
+        help="адрес любого дрона: m2=http://192.168.1.106:2200. Ключ можно повторять",
+    )
+    p.add_argument(
+        "--survey-serial",
+        action="store_true",
+        help="поднимать мониторы по очереди, а не всех разом (медленнее, спокойнее)",
+    )
     p.add_argument("--fire-cell", type=_cell, help="клетка пожара, например 4,2")
     p.add_argument("--fire-level", type=int, help="уровень пожара = число поездок за водой")
     p.add_argument(
@@ -98,6 +109,16 @@ def apply_args(cfg, args) -> None:
         cfg.override("robots.rover.url", args.rover_url)
     if args.drone_url:
         cfg.override("robots.monitors.m1.url", args.drone_url)
+    for pair in args.monitor_url or []:
+        name, sign, url = pair.partition("=")
+        name, url = name.strip(), url.strip()
+        if not sign or not url:
+            raise SystemExit(f"адрес дрона пишется как имя=адрес — получено {pair!r}")
+        if name not in cfg.robots.monitors:
+            raise SystemExit(f"нет такого дрона: {name}")
+        cfg.override(f"robots.monitors.{name}.url", url)
+    if args.survey_serial:
+        cfg.override("survey.serial", True)
     if args.fire_cell:
         cfg.override("scenario.fire.cell", args.fire_cell)
     if args.fire_level is not None:

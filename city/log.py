@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from datetime import datetime
 from typing import Any
 
@@ -18,6 +19,7 @@ EVENT_TYPES = (
     "RUN_START",
     "ROBOT",
     "SCAN",
+    "COVERAGE",
     "FIRE_SPOTTED",
     "SURVEY",
     "PLAN_CHOSEN",
@@ -53,17 +55,21 @@ class Log:
         self.path = os.path.join(run_dir, f"run-{stamp}.jsonl")
         self._fh = open(self.path, "w", encoding="utf-8")
         self.counts: dict[str, int] = {}
+        # Четыре монитора работают одновременно, каждый в своём потоке (этап 8):
+        # без замка их строки перемешаются посреди слова и в файле, и на экране.
+        self._lock = threading.Lock()
 
     def ev(self, type: str, **kw: Any) -> dict:
         if type not in EVENT_TYPES:
             raise ValueError(f"неизвестный тип события {type!r}")
         record = {"t": round(self.clock.now(), 2), "type": type}
         record.update(kw)
-        self._fh.write(json.dumps(record, ensure_ascii=False) + "\n")
-        self._fh.flush()
-        self.counts[type] = self.counts.get(type, 0) + 1
-        if self.echo:
-            print(self.human(record))
+        with self._lock:
+            self._fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+            self._fh.flush()
+            self.counts[type] = self.counts.get(type, 0) + 1
+            if self.echo:
+                print(self.human(record))
         return record
 
     # --- вывод в консоль ----------------------------------------------------
@@ -95,6 +101,12 @@ class Log:
                 f"{r.get('drone')} точка ({r.get('xy', ['?', '?'])[0]}, {r.get('xy', ['?', '?'])[1]}) "
                 f"привязка={r.get('anchor')} {seen}"
             )
+        if type_ == "COVERAGE":
+            seen, blind = r.get("seen") or [], r.get("blind") or []
+            body = f"сняли: {', '.join(seen) or '—'}"
+            if blind:
+                body += f"; НЕ СНЯЛИ: {', '.join(blind)}"
+            return f"{body}; клеток видно {r.get('cells_seen')}/{r.get('cells_total')}"
         if type_ == "FIRE_SPOTTED":
             return (
                 f"{_fmt_cell(r.get('cell'))} голосов {r.get('votes')}/{r.get('total')} "
