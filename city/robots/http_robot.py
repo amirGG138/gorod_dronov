@@ -79,6 +79,10 @@ class HttpRobot:
     def land(self) -> dict[str, Any]:
         return self._request("POST", "/land")
 
+    def trim(self, fwd: float, left: float) -> dict[str, Any]:
+        """Сдвинуть прицел борта на замеренный глазами увод дрона от метки, метры."""
+        return self._request("POST", "/trim", {"fwd": float(fwd), "left": float(left)})
+
     def goto(self, cell: Sequence[int], alt: float) -> dict[str, Any]:
         return self._request("POST", "/goto", {"cell": [int(cell[0]), int(cell[1])], "alt": float(alt)})
 
@@ -90,6 +94,16 @@ class HttpRobot:
 
     def shot(self) -> bytes:
         return self._request("GET", "/shot", raw=True)
+
+    def fire(self) -> dict[str, Any]:
+        """Спросить борт, что он видит: клетка очага и число огоньков.
+
+        Разбор идёт на самом дроне (onboard/drone_agent.py): он висит над своей
+        меткой и знает её номер, поэтому масштаб и поворот кадра у него точнее, чем
+        у ноутбука. Свой разбор кадров при этом никуда не делся — им пользуется
+        диспетчер (city/vision.py), а это второй, независимый источник.
+        """
+        return self._request("GET", "/fire")
 
     def drive(self, cell: Sequence[int]) -> dict[str, Any]:
         return self._request("POST", "/drive", {"cell": [int(cell[0]), int(cell[1])]})

@@ -14,8 +14,10 @@
   попытку и провал на техзащите.
 
 Шлюз «Сверх» (docs/openclaw/03-zhelezo-api-i-boevye-grabli.md): OpenAI-совместимый
-`https://ai.sverk.tech/v1`, ключ в `SVERK_API_KEY`, модели `qwen35` (текст) и
-`gemma4-vlm` (текст и картинки).
+`https://ai.sverk.tech/v1`, ключ в `SVERK_API_KEY`. Модели у нашего ключа —
+`deepseek-v4-pro` (текст) и `gemma4-vlm` (текст и картинки); `qwen35` из чужой
+документации нашему ключу закрыт (HTTP 403 `key_model_access_denied`, проверено
+29.07.2026).
 
 Запросы уходят через `subprocess` + `curl`, а не `urllib`: на рабочем ноутбуке
 `urllib` падает с `SSL: CERTIFICATE_VERIFY_FAILED` (CLAUDE.md).
@@ -44,7 +46,10 @@ RU = (
     "col и row целые, отсчёт с нуля."
 )
 
-MAX_TOKENS = 700
+# Ответы у нас короткие, но лимит считается вместе с размышлениями модели, если
+# они всё-таки просочатся (см. ключи глушения в `_remote`). 1200 — запас на это,
+# при котором ответ всё ещё успевает прийти до llm.timeout.
+MAX_TOKENS = 1200
 RETRY_PAUSE = 0.5
 
 
@@ -120,7 +125,7 @@ class Brain:
         self.provider = str(cfg.get("llm.provider", "mock"))
         self.base = str(cfg.get("llm.base", "https://ai.sverk.tech/v1")).rstrip("/")
         self.key_env = str(cfg.get("llm.key_env", "SVERK_API_KEY"))
-        self.model = str(cfg.get("llm.model", "qwen35"))
+        self.model = str(cfg.get("llm.model", "deepseek-v4-pro"))
         self.vlm_model = str(cfg.get("llm.vlm_model", "gemma4-vlm"))
         self.timeout = float(cfg.get("llm.timeout", 30))
         self.enabled = bool(cfg.get("flags.use_llm", False))
@@ -254,10 +259,15 @@ class Brain:
                 "type": "json_schema",
                 "json_schema": {"name": "answer", "strict": True, "schema": schema},
             },
-            # Qwen3 иначе уходит в размышления вслух, съедает весь бюджет токенов и
-            # возвращает finish=length без ответа (docs/openclaw/03).
+            # Три способа сказать «не думай вслух», потому что модели их понимают
+            # по-разному, а лишние ключи шлюз молча игнорирует. Первые два — от
+            # Qwen3 (docs/openclaw/03); `deepseek-v4-pro` слушается только третьего
+            # (проверено 29.07.2026: без него он тратит на размышления 2000 токенов,
+            # упирается в лимит и возвращает finish=length без ответа за 40-55 с,
+            # с ним — 0 токенов размышлений и готовый JSON за 14 с).
             "enable_thinking": False,
             "chat_template_kwargs": {"enable_thinking": False},
+            "reasoning": {"enabled": False},
         }
         body, error = self._curl(payload)
         if body is None:
@@ -325,8 +335,8 @@ def _parse_reply(body: dict) -> tuple[dict | None, str]:
         return None, f"в ответе шлюза нет choices[0].message.content: {_short(json.dumps(body, ensure_ascii=False))}"
     if choice.get("finish_reason") == "length":
         return None, (
-            "модель упёрлась в лимит токенов и не дошла до ответа — похоже, не "
-            "выключился режим размышлений (enable_thinking)"
+            "модель упёрлась в лимит токенов и не дошла до ответа: размышления "
+            f"вслух съели весь бюджет {MAX_TOKENS} токенов"
         )
     data = _extract_json(content or "")
     if data is None:

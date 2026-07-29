@@ -39,11 +39,10 @@ HELP = """
 Команды (можно первой буквой):
   статус (с)        спросить, что с дроном
   кадр   (к)        снять фотографию, открыть её и разобрать: где метки и очаг
-  обзор  (о) 0.5    облёт: по очереди на 0,5 м в восемь сторон, каждый раз
-                    кадр и возврат на метку
-  обзор  (о) 0.5 0.5  одна точка: отлететь от метки на столько метров по каждой
-                    оси, снять кадр, вернуться
-  взлет  (в) [1.5]  подняться на высоту в метрах
+  огонь  (о)        спросить борт, что он видит: клетка очага и число огоньков
+  взлет  (в) [2.0]  подняться на высоту в метрах и висеть над своей меткой
+  сдвиг  10 8       дрон висит мимо метки: на 10 см вперёд и 8 см вправо.
+                    Назад и влево — с минусом. Подтягивает прямо в полёте
   сесть  (п)        посадка
   стоп              аварийная посадка немедленно
   выход  (q)        посадить, всё выключить и выйти
@@ -109,11 +108,11 @@ def start_agent(host: str, args) -> tuple[str, subprocess.Popen]:
     launch = (
         f"{REMOTE_DIR}/run_agent.sh"
         f" --name {args.name} --cell {args.cell} --port {args.port}"
-        f" --watchdog {args.watchdog} --color {args.color} --frame {args.frame}"
-        f" --allow-scan --scan-radius {args.scan_radius}"
+        f" --watchdog {args.watchdog} --color {args.color} --alt {args.alt}"
+        + (f" --marker {args.marker}" if args.marker is not None else "")
         + (" --no-yaw-hold" if args.no_yaw_hold else "")
-        + (" --no-alt-hold" if args.no_alt_hold else "")
-        + (f" --pad-z {args.pad_z}" if args.pad_z is not None else "")
+        + (" --no-hold" if args.no_hold else "")
+        + (f" --fov-deg {args.fov_deg}" if args.fov_deg is not None else "")
         + f" </dev/null >{log} 2>&1"
     )
     proc = subprocess.Popen(
@@ -180,20 +179,35 @@ def show_status(drone: HttpRobot) -> dict:
         else:
             drift = st.get("yaw_drift")
             say(f"курс: увод {drift:+d}°" if drift is not None else "курс: увод ещё не мерян")
-    if "agl" in st:
-        # Высоту борт держит по дальномеру, а поле разновысотное: «под дроном» — это
-        # насколько поверхность под ним выше своей площадки (крыша дома даёт плюс),
-        # «над полем» — высота, которую он на самом деле держит.
-        agl = st.get("agl")
-        if agl is None:
-            say("высота: замера ещё не было")
+    if "marker" in st:
+        # Дрон держится за свою метку: и место, и высота считаются по ней одной.
+        # alt_seen = null означает «метку не вижу», а не «высота ноль».
+        if st.get("marker_lost"):
+            say(f"метку {st['marker']} ПОТЕРЯЛ ({st.get('blind', 0)} кадров подряд) — "
+                f"ищу: подъёмов {st.get('search_rises', 0)}, отходы по сторонам")
+        elif st.get("alt_seen") is None:
+            say(f"метки {st['marker']} в этом кадре не видно (подряд: {st.get('blind', 0)})")
         else:
-            say(f"над полем {agl:.2f} м, под дроном {st.get('ground', 0.0):+.2f} м, "
-                f"ступенек: {st.get('terrain_steps', 0)}")
-        if st.get("terrain_warning"):
-            say(f"высота: {st['terrain_warning']}")
-    elif st.get("alt_hold_off"):
-        say(f"высоту борт не держит: {st['alt_hold_off']}")
+            # «отрабатываю поправку» — это не зависший борт: такт намеренно молчит,
+            # пока прошлый сдвиг доезжает, иначе замер снимался бы с накренённого
+            # дрона. Без пометки застывший промах читался бы как поломка.
+            doing = " (отрабатываю поправку)" if st.get("settling") else ""
+            say(f"держусь за метку {st['marker']}: промах {st.get('miss', 0):.2f} м, "
+                f"высота по метке {st['alt_seen']:.2f} м "
+                f"(сторона {st.get('side_px')} точек){doing}")
+        aim = st.get("aim")
+        if aim and any(aim):
+            # Промах в кадре и расстояние до метки глазами — разные величины: если
+            # прицел сдвинут, «промах 0.00» означает «дрон там, куда его целили».
+            say(f"прицел сдвинут: вперёд {aim[0] * 100:+.0f} см, влево {aim[1] * 100:+.0f} см "
+                f"(меняется командой «сдвиг»)")
+    if st.get("fire"):
+        fire = st["fire"]
+        if fire.get("found"):
+            say(f"последний ответ про огонь: клетка {fire['cell']}, "
+                f"огоньков {fire['count']}")
+        else:
+            say(f"последний ответ про огонь: не вижу ({fire.get('note', '')})")
     if st.get("last_error"):
         say(f"последняя ошибка борта: {st['last_error']}")
     return st
@@ -257,124 +271,26 @@ def explain_shot(frame: bytes, path: str, drone: HttpRobot) -> str:
         return ""
 
 
-# Восемь сторон облёта: доли заданного расстояния по осям поля и как назвать вслух.
-# Диагонали укорочены в √2 раз, чтобы наискосок улетать на те же метры, что и прямо:
-# иначе угловые точки уезжают на 41 % дальше и упираются в предел --scan-radius.
-DIAG = 0.7071
-DIRECTIONS = (
-    (0.0, 1.0, "вперёд"),
-    (DIAG, DIAG, "вперёд-вправо"),
-    (1.0, 0.0, "вправо"),
-    (DIAG, -DIAG, "назад-вправо"),
-    (0.0, -1.0, "назад"),
-    (-DIAG, -DIAG, "назад-влево"),
-    (-1.0, 0.0, "влево"),
-    (-DIAG, DIAG, "вперёд-влево"),
-)
+def do_fire(drone: HttpRobot) -> None:
+    """«огонь» — спросить борт, что он видит прямо сейчас.
 
-
-def do_look(drone: HttpRobot, rest: str, counter: list[int], args) -> None:
-    """«обзор 0.5» — облёт восьми сторон, «обзор 0.5 0.5» — одна точка."""
-    parts = rest.replace(",", " ").split()
-    try:
-        numbers = [float(p) for p in parts]
-    except ValueError:
-        say("расстояние пишется числом, например: обзор 0.5")
-        return
-    if len(numbers) == 1:
-        do_sweep(drone, numbers[0], counter, args)
-    elif len(numbers) == 2:
-        home = pad_xy(args)
-        point = (home[0] + numbers[0], home[1] + numbers[1])
-        if drone.status().get("state") != "hover":
-            say("сначала взлёт")
-            return
-        if hop(drone, point, args, "отлёт"):
-            take_shot(drone, counter)
-        else:
-            say("кадр не снимаю")
-        if hop(drone, home, args, "возврат на метку"):
-            say("дрон снова над своей меткой")
-    else:
-        say("нужно одно число (облёт восьми сторон) или два (одна точка): "
-            "обзор 0.5  либо  обзор 0.5 0.5")
-
-
-def do_sweep(drone: HttpRobot, step: float, counter: list[int], args) -> None:
-    """Облёт: восемь сторон по очереди, каждый раз с возвратом на свою метку.
-
-    Возврат после каждой стороны — не вежливость, а условие работы: курс борт
-    держит по метке своей площадки, и вдали от неё держать его нечем.
+    Разбор идёт на самом дроне: он висит над своей меткой, знает её номер и место на
+    поле, поэтому масштаб и поворот кадра у него точнее, чем у ноутбука. Пульт только
+    пересказывает ответ словами.
     """
-    if step <= 0:
-        say("расстояние должно быть больше нуля, например: обзор 0.5")
-        return
-    if step > args.scan_radius:
-        # Отказал бы борт, но лучше сказать это здесь, чем восемь раз подряд там.
-        say(f"дальше {args.scan_radius:g} м от своей метки борт не улетит — "
-            f"возьмите меньше или запустите пульт с --scan-radius")
-        return
-    if drone.status().get("state") != "hover":
-        say("сначала взлёт")
-        return
-    home = pad_xy(args)
-    say(f"облёт: восемь сторон по {step:g} м от метки ({home[0]:.2f}, {home[1]:.2f}) м")
-    say("«вперёд» — сторона поля, куда растёт y. Кадры кладу в файлы, окна не открываю")
     try:
-        for number, (kx, ky, name) in enumerate(DIRECTIONS, 1):
-            point = (home[0] + kx * step, home[1] + ky * step)
-            say(f"── {number} из 8: {name}")
-            if hop(drone, point, args, f"отлёт {name}"):
-                take_shot(drone, counter, open_it=False)
-            else:
-                say("кадр не снимаю")
-            if not hop(drone, home, args, "возврат на метку"):
-                say("ОБЛЁТ ОСТАНОВЛЕН: дрон не над своей меткой — смотрите на дрон")
-                return
-    except KeyboardInterrupt:
-        # Бросить дрон на точке обзора нельзя: там ему нечем держать курс, а сторож
-        # сядет прямо туда. Возврат важнее, чем быстро отдать приглашение обратно.
-        print()
-        say("облёт прерван — возвращаю на метку (ещё раз Ctrl+C прервёт и это)")
-        hop(drone, home, args, "возврат на метку")
+        answer = drone.fire()
+    except RobotError as exc:
+        say(f"борт не ответил про огонь: {exc}")
         return
-    say(f"облёт закончен, дрон над своей меткой; кадры лежат в {SHOTS}/")
-
-
-def hop(drone: HttpRobot, point: tuple[float, float], args, what: str) -> bool:
-    """Один перелёт к точке поля. True — борт подтвердил, что долетел.
-
-    Ждём именно конца команды, а не состояния «вишу»: в полёте борт остаётся в
-    «вишу», и по состоянию отлёт неотличим от его начала. Снимать кадр раньше
-    времени нельзя вдвойне — он будет с прежней точки, и запрос к камере
-    столкнётся с полётом в одном ROS-узле.
-    """
-    was_error = drone.status().get("last_error", "")
-    say(f"{what}: точка ({point[0]:.2f}, {point[1]:.2f}) м")
-    drone.look(point, args.alt)
-    done = wait_done(drone, 25)
-    state = drone.status().get("state", "")
-    fresh = drone.status().get("last_error", "")
-    if not done:
-        say(f"ВНИМАНИЕ: борт не доложил об окончании ({what})")
-    if fresh and fresh != was_error:
-        # Отказ на вылете: дрон остался там, где был. Писать в лог «долетел и снял»
-        # в этом случае — значит записать неправду.
-        say(f"борт НЕ ПОЛЕТЕЛ: {fresh}")
-        return False
-    if state != "hover":
-        say(f"ВНИМАНИЕ: борт не подтвердил, что долетел ({what})")
-        return False
-    return True
-
-
-def pad_xy(args) -> tuple[float, float]:
-    """Координаты своей площадки в метрах поля — по тому же config.yaml, что у диспетчера."""
-    from . import config as config_mod
-    from .field import Field
-
-    cell = tuple(int(v) for v in args.cell.split(","))
-    return Field.from_config(config_mod.load()).cell_to_m(cell)
+    if not answer.get("found"):
+        say(f"очага не вижу: {answer.get('note') or 'пятен нужного цвета нет'}")
+        return
+    say(f"ОЧАГ в клетке {answer['cell']}: огоньков {answer['count']} "
+        f"= столько же поездок за водой (счёт по «{answer['count_source']}», "
+        f"кучка {answer.get('spread_m', 0):.2f} м, привязка «{answer['anchor']}»)")
+    if answer.get("note"):
+        say(f"оговорка: {answer['note']}")
 
 
 def wait_state(drone: HttpRobot, want: tuple[str, ...], seconds: float) -> str:
@@ -419,6 +335,34 @@ def do_takeoff(drone: HttpRobot, alt: float, confirmed: list[bool]) -> None:
         say("дрон висит — можно снимать кадр")
     else:
         say("ВНИМАНИЕ: подъём не подтвердился, смотрите строки борта выше")
+
+
+def do_trim(drone: HttpRobot, rest: str) -> None:
+    """«сдвиг 10 8» — дрон висит на 10 см вперёд и 8 см вправо от своей метки.
+
+    Числа в САНТИМЕТРАХ и с точки зрения дрона (нос — «вперёд»): назад и влево —
+    со знаком минус. Борт прибавит их к прицелу прямо в полёте, и следующий такт
+    удержания уже подтянет дрон на метку.
+    """
+    parts = rest.replace(",", ".").split()
+    if not parts or len(parts) > 2:
+        say("нужно: сдвиг <вперёд см> [<вправо см>], например «сдвиг 10 8»")
+        say("назад и влево — с минусом: «сдвиг -5 -12»")
+        return
+    try:
+        fwd_cm = float(parts[0])
+        right_cm = float(parts[1]) if len(parts) > 1 else 0.0
+    except ValueError:
+        say("сантиметры числом: «сдвиг 10 8»")
+        return
+    if max(abs(fwd_cm), abs(right_cm)) > 50.0:
+        say("больше полуметра за раз не даю: это уже не подстройка, а промах в замере")
+        return
+    # «Вправо» человеку понятнее, чем «влево −8», а борт считает влево.
+    answer = drone.trim(fwd_cm / 100.0, -right_cm / 100.0)
+    aim = answer.get("aim") or [0.0, 0.0]
+    say(f"прицел борта теперь: вперёд {aim[0] * 100:+.0f} см, влево {aim[1] * 100:+.0f} см")
+    say("посмотрите на дрон снова: осталось смещение — повторите «сдвиг» на остаток")
 
 
 def do_land(drone: HttpRobot) -> None:
@@ -473,8 +417,10 @@ def loop(drone: HttpRobot, args) -> None:
                     say(f"выше {args.max_alt:g} м нельзя (регламент: потолок 4 м)")
                     continue
                 do_takeoff(drone, alt, confirmed)
-            elif word in ("обзор", "о", "o"):
-                do_look(drone, rest, counter, args)
+            elif word in ("огонь", "о", "o"):
+                do_fire(drone)
+            elif word in ("сдвиг", "прицел"):
+                do_trim(drone, rest)
             elif word in ("сесть", "посадка", "п", "l"):
                 do_land(drone)
             elif word == "стоп":
@@ -546,30 +492,24 @@ def build_parser() -> argparse.ArgumentParser:
                    help=f"порт внутри контейнера, его занимает бортовая программа (по умолчанию {AGENT_PORT})")
     p.add_argument("--net-port", type=int, default=NET_PORT,
                    help=f"порт, по которому дрон виден снаружи (по умолчанию {NET_PORT})")
-    p.add_argument("--alt", type=float, default=1.5, help="высота по умолчанию, м")
-    p.add_argument("--max-alt", type=float, default=3.5, help="выше не пускать, м")
-    p.add_argument("--scan-radius", type=float, default=1.0,
-                   help="дальше этого от своей метки борт не улетит по команде «обзор», м")
-    p.add_argument("--watchdog", type=float, default=20.0, help="сесть, если нет команд N с")
+    p.add_argument("--alt", type=float, default=2.0, help="высота зависания, м")
+    p.add_argument("--max-alt", type=float, default=3.0, help="выше не пускать, м")
+    p.add_argument("--marker", type=int, default=None,
+                   help="номер своей метки; без ключа борт берёт его из карты поля по клетке")
+    p.add_argument("--watchdog", type=float, default=120.0, help="сесть, если нет команд N с")
     p.add_argument("--color", choices=("bgr", "rgb"), default="bgr", help="порядок цветов камеры")
-    p.add_argument(
-        "--frame", choices=("body", "aruco_map"), default="body",
-        help="как борт летает в точку: body — смещением от текущего места (карта не нужна), "
-             "aruco_map — по карте меток (нужна живая локализация на борту)",
-    )
     p.add_argument(
         "--no-yaw-hold", action="store_true",
         help="не держать курс дрона по метке площадки (по умолчанию борт его держит)",
     )
     p.add_argument(
-        "--no-alt-hold", action="store_true",
-        help="не держать высоту по дальномеру (по умолчанию борт её держит и не "
-             "проседает, когда из-под него уходит крыша дома)",
+        "--no-hold", action="store_true",
+        help="не держаться за метку вовсе: высота и положение остаются на автопилоте",
     )
     p.add_argument(
-        "--pad-z", type=float, default=None,
-        help="измеренная рулеткой высота площадки над полом поля, м; без ключа борт "
-             "берёт её из карты поля по клетке (карта на железе не проверялась)",
+        "--fov-deg", type=float, default=None,
+        help="угол обзора камеры, град: по нему борт переводит сторону метки в высоту. "
+             "Дрон висит не на той высоте, что просили, — калибровать этим ключом",
     )
     p.add_argument("--no-upload", action="store_true", help="не обновлять программу на борту")
     p.add_argument("--no-restart", action="store_true", help="не перезапускать уже работающую")

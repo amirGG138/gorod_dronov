@@ -21,7 +21,7 @@ CONFIG = {
         "provider": "mock",
         "base": "https://ai.sverk.tech/v1",
         "key_env": "TEST_KEY_NOT_SET",
-        "model": "qwen35",
+        "model": "deepseek-v4-pro",
         "vlm_model": "gemma4-vlm",
         "timeout": 5,
         "advise_plan": True,
@@ -83,7 +83,7 @@ class TestMockProvider(unittest.TestCase):
     def test_model_name_is_reported_honestly(self):
         self.assertEqual(brain().advise_plan(FACTS).model, "mock")
         self.assertEqual(brain(provider="sverk").name("see"), "gemma4-vlm")
-        self.assertEqual(brain(provider="sverk").name("plan"), "qwen35")
+        self.assertEqual(brain(provider="sverk").name("plan"), "deepseek-v4-pro")
 
 
 class TestSwitches(unittest.TestCase):
@@ -142,7 +142,16 @@ class TestRemoteTransport(unittest.TestCase):
         with mock.patch.object(subprocess, "run", return_value=curl_returns(body)):
             ans = self.brain.explain("тема", {})
         self.assertFalse(ans.ok)
-        self.assertIn("enable_thinking", ans.error)
+        self.assertIn("лимит токенов", ans.error)
+
+    def test_thinking_is_switched_off_every_way_the_gateway_knows(self):
+        """Без «reasoning: enabled=false» deepseek тратит весь лимит на размышления."""
+        body = json.dumps(reply(json.dumps({"reason": "коротко"}))) + "\n200"
+        with mock.patch.object(subprocess, "run", return_value=curl_returns(body)) as run:
+            self.brain.explain("тема", {})
+        payload = json.loads(run.call_args.kwargs["input"].decode("utf-8"))
+        self.assertEqual(payload["reasoning"], {"enabled": False})
+        self.assertFalse(payload["enable_thinking"])
 
     def test_client_error_is_not_retried(self):
         body = '{"error": "bad key"}\n401'
