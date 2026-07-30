@@ -22,6 +22,10 @@ from .base import RobotError
 TIMEOUT = 3.0  # борт отвечает мгновенно: команда принимается, а не исполняется
 RETRIES = 1  # одна повторная попытка — потеря пакета в Wi-Fi это норма
 RETRY_PAUSE = 0.2
+# Исключение из правила «борт отвечает мгновенно»: на GET /fire он крутит OpenCV
+# и отвечает уже посчитанным вердиктом. Больше не ставим намеренно — вердикт это
+# роскошь, а времени у попытки 15 минут (бюджет считает диспетчер).
+FIRE_TIMEOUT = 4.0
 
 
 class HttpRobot:
@@ -34,7 +38,14 @@ class HttpRobot:
 
     # --- транспорт ----------------------------------------------------------
 
-    def _request(self, method: str, path: str, body: dict | None = None, raw: bool = False):
+    def _request(
+        self,
+        method: str,
+        path: str,
+        body: dict | None = None,
+        raw: bool = False,
+        timeout: float = TIMEOUT,
+    ):
         if method == "POST":
             # Один и тот же command_id на все попытки одной команды. Повторяем мы
             # молча, по потерянному ответу, — а борт по этому id узнаёт, что уже
@@ -48,7 +59,7 @@ class HttpRobot:
                 f"{self.url}{path}", data=data, headers=headers, method=method
             )
             try:
-                with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
                     payload = resp.read()
                 return payload if raw else json.loads(payload or b"{}")
             except urllib.error.HTTPError as exc:
@@ -102,11 +113,37 @@ class HttpRobot:
         меткой и знает её номер, поэтому масштаб и поворот кадра у него точнее, чем
         у ноутбука. Свой разбор кадров при этом никуда не делся — им пользуется
         диспетчер (city/vision.py), а это второй, независимый источник.
-        """
-        return self._request("GET", "/fire")
 
-    def drive(self, cell: Sequence[int]) -> dict[str, Any]:
-        return self._request("POST", "/drive", {"cell": [int(cell[0]), int(cell[1])]})
+        ВАЖНО: борт снимает на этот запрос СВЕЖИЙ кадр. Значит спрашивать можно
+        только пока он висит над меткой: с земли придёт вердикт по полу, и принять
+        его за «огня нет» опаснее, чем не спросить вовсе.
+        """
+        return self._request("GET", "/fire", timeout=FIRE_TIMEOUT)
+
+    def tell_fire(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Сказать роверу, где горит. Это знание, а не команда движения.
+
+        Основной канал доставки квадрата огня; резервный — те же поля в теле
+        `drive()`. Два канала нужны потому, что агент ровера запускают руками с
+        ноутбука и на площадке он легко окажется версии, ничего про /fire не
+        знающей: она ответит 404, а лишние поля в теле /drive молча проглотит.
+        """
+        return self._request("POST", "/fire", dict(payload))
+
+    def drive(
+        self,
+        cell: Sequence[int],
+        fire: Sequence[int] | None = None,
+        fire_level: int | None = None,
+    ) -> dict[str, Any]:
+        body: dict[str, Any] = {"cell": [int(cell[0]), int(cell[1])]}
+        if fire is not None:
+            # Резервный канал квадрата огня. Агент, который про него не знает,
+            # эти поля просто не читает — сломать переезд они не могут.
+            body["fire"] = [int(fire[0]), int(fire[1])]
+            if fire_level is not None:
+                body["fire_level"] = int(fire_level)
+        return self._request("POST", "/drive", body)
 
     def led(self, mode: str, color: str | None = None) -> dict[str, Any]:
         body: dict[str, Any] = {"mode": mode}

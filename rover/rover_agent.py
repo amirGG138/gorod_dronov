@@ -6,7 +6,7 @@
 режимы ленты) и родным API ровера (метры карты, лиз управления, эффекты ленты).
 Поэтому запускается там, откуда видно ровер — с ноутбука рядом с диспетчером:
 
-    python3 rover_agent.py --port 8010 --rover-ip 192.168.1.125
+    python3 rover/rover_agent.py --port 8010 --rover-ip 192.168.1.125
 
 Дальше диспетчер зовёт http://127.0.0.1:8010, ровно как мок из этапа 1. Переезд с
 мока на железо — это подмена rover.url в config.yaml, и больше ничего.
@@ -19,12 +19,40 @@
     POST /led     -> {"mode":"blink"|"on"|"off","color":"#RRGGBB"}
     POST /stop    -> немедленная остановка
 
+    POST /fire    -> {"cell":[col,row],"level":N,...}  где горит; {"clear":true} — потушено
+    GET  /fire    -> {"known":true,"fire":{...}}  прочитать квадрат обратно
+
+/fire — это ЗНАНИЕ, а не команда: ровер запоминает клетку пожара и отдаёт её в
+/status, но никуда по ней не едет (перевод клеток в метры карты требует ручной
+калибровки Anchor, см. раздел «квадрат огня» в коде). Тот же квадрат приезжает
+резервным каналом в теле POST /drive (поля fire/fire_level) — так он доходит
+даже до агента, ничего про /fire не знающего.
+
+Сверх контракта диспетчера есть ещё одна ручка — ей он не пользуется:
+
+    POST /goto    -> {"cell":[col,row]}  доехать до ЛЮБОЙ клетки поля самому
+
+/goto строит маршрут A* по сетке 6x6 в обход домов (топология берётся из
+city/config.yaml) и едет по нему клетка за клеткой, тем же кодом, что и /drive.
+Он нужен рукам оператора: проверить калибровку сетки, объехать поле, доехать до
+башни — всё это без запуска миссии. Диспетчер по-прежнему зовёт /drive по одной
+клетке, потому что так же он считает игровой заряд.
+
 Проверка с ноутбука:
 
     curl http://127.0.0.1:8010/status
     curl -X POST http://127.0.0.1:8010/led   -d '{"mode":"blink","color":"#FF0000"}'
     curl -X POST http://127.0.0.1:8010/drive -d '{"cell":[2,3]}'
+    curl -X POST http://127.0.0.1:8010/goto  -d '{"cell":[4,3]}'
+    curl -X POST http://127.0.0.1:8010/fire  -d '{"cell":[4,2],"level":3}'
+    curl http://127.0.0.1:8010/fire
     curl -X POST http://127.0.0.1:8010/stop
+
+ОСТОРОЖНО со сторожем и /goto: сторож тормозит ровер, если запросов не было
+дольше --watchdog (3 с), а маршрут из нескольких клеток едет десятки секунд. Под
+диспетчером это не мешает — он частит /status; одиночный curl молчит, и ровер
+встанет на первом же шаге. Для ручного прогона либо держите рядом опрос статуса
+в цикле (curl /status раз в секунду), либо запускайте с --watchdog 0.
 
 Что проверено на живом ровере 192.168.1.125 (он же rover-01, ROS 2 Jazzy) 2026-07-29
 (адрес по DHCP, на площадке будет другой — задаётся ключом --rover-ip):
@@ -60,13 +88,35 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
+import sys
 import threading
 import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.0"
+# Топологию поля (границы 6x6 и клетки домов) для /goto берём из city/config.yaml,
+# чтобы раскладка жила в одном месте на весь репозиторий, а A* не пришлось писать
+# второй раз. Оба модуля обходятся стандартной библиотекой, как и этот файл.
+#
+# ЛОВУШКА: у Field СВОЙ якорь — от центра поля, под ArUco-карту дронов
+# ((col-2.5)*0.8). У нас карта другая: SLAM ровера, отсчёт от клетки [0,0] через
+# Anchor ниже. Поэтому от Field берём ТОЛЬКО топологию (in_bounds, is_road, astar,
+# moves), а Field.cell_to_m в этом файле звать нельзя — разъедется на 2 м.
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+try:
+    from city.config import load as load_config
+    from city.field import Field
+except Exception as exc:  # noqa: BLE001 — без поля агент обязан работать как раньше
+    Field = None
+    _FIELD_IMPORT_ERROR = str(exc)
+else:
+    _FIELD_IMPORT_ERROR = ""
+
+VERSION = "1.1"
 
 DEDUP_KEEP = 64  # сколько последних command_id помнить (столько же, сколько борт дрона)
 
@@ -78,10 +128,40 @@ NAV_ACTIVE = ("sending", "accepted", "navigating", "executing", "canceling", "ac
 # Наши режимы ленты -> эффект родного драйвера ровера. off гасит ленту (enabled=false).
 LED_EFFECT = {"on": "fill", "blink": "blink", "off": "fill"}
 
+# Поля квадрата огня, которые агент понимает. Всё прочее из тела запроса
+# складывается в extra и возвращается в /status как есть: диспетчер может
+# поумнеть раньше агента, и тогда обмен не потребует обновлять сразу обе
+# программы (а на площадке их обновляют по отдельности и в спешке).
+FIRE_KEYS = ("cell", "level", "tower", "approach", "charge", "source", "confidence", "at")
+FIRE_CELL_KEYS = ("tower", "approach", "charge")  # клетки-ориентиры рядом с очагом
+
 
 def say(text: str) -> None:
     """Строка в терминал ноутбука рядом с диспетчером."""
     print(f"[{time.strftime('%H:%M:%S')}] {text}", flush=True)
+
+
+def moves_word(n: int) -> str:
+    """«1 переезд», «2 переезда», «5 переездов» — маршрут читают люди."""
+    if n % 100 not in (11, 12, 13, 14):
+        if n % 10 == 1:
+            return "переезд"
+        if n % 10 in (2, 3, 4):
+            return "переезда"
+    return "переездов"
+
+
+def load_field(args) -> tuple:
+    """Поле для маршрутов /goto и причина, если его нет. Отсутствие — не ошибка."""
+    if args.no_field:
+        return None, "знание поля выключено ключом --no-field"
+    if Field is None:
+        return None, f"city/field.py не импортируется ({_FIELD_IMPORT_ERROR})"
+    try:
+        cfg = load_config(args.config) if args.config else load_config()
+        return Field.from_config(cfg), ""
+    except Exception as exc:  # noqa: BLE001 — конфиг правят руками, ошибки бывают
+        return None, f"конфигурация поля не прочитана ({exc})"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -142,10 +222,14 @@ def _http(url: str, body: dict | None = None, headers: dict | None = None,
     except urllib.error.HTTPError as exc:
         detail = ""
         try:
-            detail = (json.loads(exc.read() or b"{}") or {}).get("message", "")
+            # «message» — у родного API ровера, «error» — у нашего агента: этот же
+            # транспорт ходит в оба, и причина отказа нужна человеку целиком.
+            body_err = json.loads(exc.read() or b"{}") or {}
+            detail = body_err.get("message") or body_err.get("error") or ""
         except Exception:  # noqa: BLE001 — тело ошибки не важнее самого кода
             pass
-        raise RoverLinkError(f"{method or 'GET'} {url} -> {exc.code} {detail}") from exc
+        verb = method or ("POST" if data is not None else "GET")
+        raise RoverLinkError(f"{verb} {url} -> {exc.code} {detail}") from exc
     except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
         raise RoverLinkError(f"нет связи с {url} ({exc})") from exc
 
@@ -369,10 +453,14 @@ class Job:
 class Agent:
     role = "rover"
 
-    def __init__(self, args, backend, anchor: Anchor) -> None:
+    def __init__(self, args, backend, anchor: Anchor,
+                 field=None, field_why: str = "поле не загружено") -> None:
         self.args = args
         self.backend = backend
         self.anchor = anchor
+        # Топология поля нужна только /goto; всё остальное работает и без неё.
+        self.field = field
+        self.field_why = field_why
         self.name = args.name
         self.cell = tuple(int(v) for v in args.cell.split(","))
         # idle | moving | stopped | error
@@ -386,6 +474,13 @@ class Agent:
         self._seq = 0
         self._done: dict[str, dict] = {}
         self._done_lock = threading.Lock()
+        self._req = 0  # номер заезда: у каждой цели Nav2 свой request_id
+        self._route: dict | None = None  # маршрут /goto, пока по нему едут
+        # Квадрат огня: что диспетчер сказал про очаг. Только знание, не движение —
+        # см. раздел «квадрат огня» ниже.
+        self.fire: dict | None = None
+        self._fire_t = 0.0  # когда узнали, по своим часам (для поля since)
+        self._fire_lock = threading.Lock()
         self._last_move = time.monotonic()
         self._last_request = time.monotonic()
         # Снимок состояния ровера обновляет фоновый опрос: /status обязан отвечать
@@ -416,6 +511,19 @@ class Agent:
             st["frame_id"] = snap["frame_id"]
             # Клетка по живой позе — для сверки с confirmed cell и для глаз оператора.
             st["pose_cell"] = list(self.anchor.m_to_cell(x, y))
+        route = self._route
+        if route is not None:
+            # Есть только пока ровер идёт маршрутом /goto: цель, весь путь и
+            # сколько переездов до неё осталось.
+            st["goal"] = list(route["goal"])
+            st["path"] = [list(c) for c in route["path"]]
+            st["path_left"] = route["left"]
+        fire = self.fire_view()
+        if fire is not None:
+            # Есть только когда диспетчер уже сказал, где горит. Он же по этому
+            # ключу проверяет, дошёл ли квадрат, и присылает заново, если агента
+            # перезапустили посреди попытки.
+            st["fire"] = fire
         if snap["battery"] is not None:
             st["battery_v"] = round(snap["battery"], 2)
         if self.args.dry:
@@ -455,6 +563,12 @@ class Agent:
                 raise Busy(f"{self.name} занят: идёт «{self.current}»")
             if self._job is not None:
                 self._job.cancel.set()
+                # Маршрут принадлежал снятой команде — в /status его больше быть не
+                # должно ни секунды. Убирает его именно вытесняющая команда, а не
+                # поток снятой: тот успевает домотать свои вызовы к роверу уже после
+                # того, как состояние стало «stopped», и всё это время статус
+                # утверждал бы, что ровер куда-то идёт.
+                self._route = None
             self._seq += 1
             job = self._job = Job(self._seq, name)
             self._busy = True
@@ -514,28 +628,10 @@ class Agent:
         return self.start("drive", lambda job: self._drive(target, job))
 
     def _drive(self, target, job: Job) -> None:
-        if target == self.cell:  # уже здесь — засчитываем как доехал, лиз не берём
-            self._set(job, state="idle", cell=target, moved=True)
-            return
-        x, y = self.anchor.cell_to_m(target)
-        yaw = self._snap["pose"][2] if self._snap.get("pose") else self.args.goal_yaw
-        request_id = f"{self.name}-{self._seq}"
-        say(f"ЕДУ в клетку {list(target)} = ({x:.2f}, {y:.2f}) м карты")
         self._set(job, state="moving")
-        self.last_error = ""
-
-        arrived = self._go_once(target, x, y, yaw, request_id, job)
+        arrived = self._hop(target, job)
         if arrived is None:  # команду сменили посреди заезда
             return
-        for attempt in range(self.args.retries):
-            if arrived:
-                break
-            # Nav2 умеет отдать aborted, стоя уже почти у цели; ретрай — грабли из
-            # docs/openclaw/03. Дальше — честный провал, а не бесконечные попытки.
-            say(f"ровер не доехал — повтор {attempt + 1}")
-            arrived = self._go_once(target, x, y, yaw, f"{request_id}-r{attempt}", job)
-            if arrived is None:
-                return
         if arrived:
             self._set(job, state="idle", cell=target, moved=True)
             say(f"доехал в {list(target)}")
@@ -545,6 +641,114 @@ class Agent:
             if self._set(job, state="error"):
                 self.last_error = f"не доехал в {list(target)} за {self.args.drive_timeout:g} с"
             say(f"НЕ ДОЕХАЛ в {list(target)}")
+
+    def _hop(self, target, job: Job) -> bool | None:
+        """Один переезд в соседнюю клетку. True — доехал, False — нет, None — сменили.
+
+        Общее тело для /drive и для каждого шага /goto: ретраи, допуск по факт-позе
+        и работа с лизом живут здесь в одном месте, а не в двух похожих.
+        """
+        if target == self.cell:  # уже здесь — засчитываем как доехал, лиз не берём
+            return True
+        x, y = self.anchor.cell_to_m(target)
+        yaw = self._snap["pose"][2] if self._snap.get("pose") else self.args.goal_yaw
+        self._req += 1
+        request_id = f"{self.name}-{self._seq}-{self._req}"
+        say(f"ЕДУ в клетку {list(target)} = ({x:.2f}, {y:.2f}) м карты")
+        self.last_error = ""
+
+        arrived = self._go_once(target, x, y, yaw, request_id, job)
+        for attempt in range(self.args.retries):
+            if arrived is None or arrived:
+                break
+            # Nav2 умеет отдать aborted, стоя уже почти у цели; ретрай — грабли из
+            # docs/openclaw/03. Дальше — честный провал, а не бесконечные попытки.
+            say(f"ровер не доехал — повтор {attempt + 1}")
+            arrived = self._go_once(target, x, y, yaw, f"{request_id}-r{attempt}", job)
+        return arrived
+
+    # --- движение по маршруту -----------------------------------------------
+
+    def check_goto(self, cell, blocked=()):
+        """Маршрут до любой клетки поля. Отказ приходит сразу, а не в конце.
+
+        В отличие от /drive проверяется не соседство, а проходимость: цель должна
+        быть клеткой-дорогой этого поля, и до неё должен существовать путь.
+        """
+        if self.field is None:
+            raise Refused(f"rover: маршрут строить нечем — {self.field_why}")
+        if self.state == "moving":
+            raise Refused("rover: уже едет, вторая команда движения отклонена")
+        target = (int(cell[0]), int(cell[1]))
+        if not self.field.in_bounds(target):
+            raise Refused(
+                f"rover: клетка {list(target)} за полем "
+                f"{self.field.cols}x{self.field.rows}"
+            )
+        if not self.field.is_road(target):
+            raise Refused(f"rover: в клетке {list(target)} дом — туда не ездим")
+        if not self.field.is_road(self.cell):
+            raise Refused(
+                f"rover: сам стою в клетке {list(self.cell)}, а она не дорога — "
+                "поправьте --cell или калибровку сетки, иначе маршрут строить неоткуда"
+            )
+        path = self.field.astar(self.cell, target, blocked)
+        if path is None:
+            raise Refused(
+                f"rover: из {list(self.cell)} в {list(target)} маршрута нет — "
+                "дома или занятые клетки перекрыли все пути"
+            )
+        return path
+
+    def goto(self, cell, blocked=()) -> dict:
+        path = self.check_goto(cell, blocked)
+        moves = self.field.moves(path)
+        # Маршрут печатается ДО старта: это дешёвая проверка, что агент понял поле
+        # так же, как оператор, — пока ровер ещё стоит.
+        say(f"МАРШРУТ {list(self.cell)} -> {list(path[-1])}: {moves} {moves_word(moves)}, "
+            + " ".join(str(list(c)) for c in path))
+        if self.args.watchdog > 0:
+            say(f"сторож включён ({self.args.watchdog:g} с): держите опрос /status, "
+                "иначе ровер будет остановлен посреди маршрута")
+        answer = self.start("goto", lambda job: self._goto(path, job))
+        return {**answer, "path": [list(c) for c in path], "moves": moves}
+
+    def _goto(self, path, job: Job) -> None:
+        target = path[-1]
+        total = len(path) - 1
+        self._route = {"goal": target, "path": list(path), "left": total, "seq": job.seq}
+        self._set(job, state="moving")
+        try:
+            for step, nxt in enumerate(path[1:], start=1):
+                if job.cancel.is_set():  # /stop или вытесняющая команда
+                    return
+                arrived = self._hop(nxt, job)
+                if arrived is None:
+                    return
+                if not arrived:
+                    # Встали посреди маршрута: дальше не едем, а клетка в статусе
+                    # осталась последней ПРОЙДЕННОЙ — она честная.
+                    if self._set(job, state="error"):
+                        self.last_error = (
+                            f"маршрут прерван на шаге {step} из {total}: "
+                            f"не доехал в {list(nxt)}"
+                        )
+                    say(f"НЕ ДОЕХАЛ в {list(nxt)} — маршрут прерван")
+                    return
+                self._set(job, cell=nxt, moved=True)
+                self._route = {**self._route, "left": total - step}
+                say(f"шаг {step} из {total}: в клетке {list(nxt)}")
+            self._set(job, state="idle", cell=target, moved=True)
+            say(f"МАРШРУТ ПРОЙДЕН, ровер в клетке {list(target)}")
+        finally:
+            # Сверяемся с номером маршрута, а не с текущим job: «стоп» и любая
+            # вытесняющая команда УЖЕ подменили self._job на свой, и проверка
+            # «self._job is job» здесь всегда ложна — маршрут оставался в /status
+            # навсегда после остановки. Чужой маршрут при этом стирать нельзя:
+            # следующий /goto мог успеть поставить свой.
+            route = self._route
+            if route is not None and route.get("seq") == job.seq:
+                self._route = None
 
     def _go_once(self, target, x, y, yaw, request_id, job: Job) -> bool | None:
         """Один заезд Nav2 до цели. True — доехал, False — нет, None — команду сменили.
@@ -596,6 +800,132 @@ class Agent:
         if moved:
             self._last_move = time.monotonic()
         return True
+
+    # --- квадрат огня -------------------------------------------------------
+    #
+    # Диспетчер сообщает роверу клетку пожара, как только её узнал: сам ровер огня
+    # не видит, а по регламенту ему предстоит съездить к башне за водой и вернуться
+    # к очагу.
+    #
+    # ЗДЕСЬ КВАДРАТ ТОЛЬКО ХРАНИТСЯ, и это не недоделка. Ехать по нему агент не
+    # умеет намеренно: клетки переводятся в метры карты через Anchor, а его
+    # калибровка (--map-x0/--map-y0/--map-yaw, RUN.md 3Б.4) делается руками на
+    # площадке — до неё любой самостоятельный заезд по квадрату уедет не туда.
+    # Маршрутизацию «башня <-> очаг» добавят отдельно, и данные для неё уже лежат
+    # в этом словаре: cell, tower, approach, charge. Регламентный запрет въезжать
+    # в непотушенную клетку пожара пока держит ПЛАН диспетчера (city/rules.py,
+    # fire_route через field.approach), а не знание ровера, — не перепутайте.
+    #
+    # Квадрат приходит двумя путями, и это сделано ради отказоустойчивости:
+    #   POST /fire  — основной: приходит ДО первого переезда и умеет clear;
+    #   POST /drive — резервный: поля fire/fire_level в теле команды переезда.
+    # Резервный нельзя сломать версиями: агент любой сборки читает из тела /drive
+    # только cell и command_id, а лишнее молча игнорирует. Значит 404 на нём не
+    # бывает по построению, и квадрат доедет даже до агента, ничего про /fire не
+    # знающего, — за попытку /drive уходит около десятка раз.
+
+    def _fire_cell(self, value, what: str) -> tuple[int, int]:
+        """Клетка из тела запроса. Проходимость НЕ проверяется: очаг — это дом."""
+        try:
+            cell = (int(value[0]), int(value[1]))
+        except (TypeError, ValueError, IndexError, KeyError) as exc:
+            raise Refused(
+                f"rover: {what} задаётся парой чисел col,row — получено {value!r}"
+            ) from exc
+        if self.field is not None and not self.field.in_bounds(cell):
+            raise Refused(
+                f"rover: {what} {list(cell)} за полем {self.field.cols}x{self.field.rows}"
+            )
+        return cell
+
+    def set_fire(self, body: dict, via: str = "fire") -> dict:
+        """Запомнить квадрат огня. Принимается на ходу: 409 на этом пути не бывает."""
+        if body.get("clear"):
+            return self.clear_fire()
+        fresh: dict = {"cell": list(self._fire_cell(body["cell"], "клетка пожара"))}
+        for key in FIRE_CELL_KEYS:
+            if body.get(key) is not None:
+                fresh[key] = list(self._fire_cell(body[key], f"клетка «{key}»"))
+        if body.get("level") is not None:
+            fresh["level"] = int(body["level"])
+        for key in ("source", "confidence"):
+            if body.get(key) is not None:
+                fresh[key] = body[key]
+        if body.get("at") is not None:
+            # Часы ДИСПЕТЧЕРА с начала попытки. Со своими не сравниваем никогда:
+            # это разные машины — то же правило, по которому в статусе живёт
+            # since_move, а не абсолютная метка времени.
+            fresh["at_dispatcher"] = float(body["at"])
+        extra = {
+            k: v for k, v in body.items()
+            if k not in FIRE_KEYS and k not in ("command_id", "clear")
+        }
+        if extra:
+            fresh["extra"] = extra
+        fresh["via"] = via
+
+        with self._fire_lock:
+            known = self.fire
+            if via == "drive" and known is not None and known["cell"] == fresh["cell"]:
+                # Резервный канал повторяет то, что уже знаем. Он беднее основного
+                # (level и ориентиры в теле /drive не летят), поэтому дополняет
+                # пропуски, а не затирает известное, и возраст квадрата не сбрасывает:
+                # это не новость, а та же новость по второму каналу.
+                self.fire = {**fresh, **known}
+                new = False
+            else:
+                self.fire = fresh
+                self._fire_t = time.monotonic()
+                new = True
+        if new:
+            level = fresh.get("level")
+            say(f"ОЧАГ в клетке {fresh['cell']}"
+                + (f", огоньков {level}" if level else "")
+                + (" (резервным каналом, в теле /drive)" if via == "drive" else ""))
+        answer = {"ok": True, "accepted": True, "fire": self.fire_view()}
+        if self.field is None:
+            answer["note"] = f"поле не загружено ({self.field_why}), границы не проверены"
+        return answer
+
+    def fire_from_drive(self, body: dict) -> None:
+        """Резервный канал: квадрат огня, приехавший в теле команды переезда.
+
+        Никогда не бросает исключений. Переезд важнее квадрата: испорченное поле
+        fire не имеет права отменить движение ровера, поэтому разбор идёт отдельно
+        от команды, а жалоба уходит в last_error.
+        """
+        if body.get("fire") is None:
+            return
+        try:
+            self.set_fire(
+                {
+                    "cell": body["fire"],
+                    "level": body.get("fire_level"),
+                    "source": body.get("fire_source"),
+                    "at": body.get("fire_at"),
+                },
+                via="drive",
+            )
+        except Exception as exc:  # noqa: BLE001 — см. докстринг
+            # И в терминал, и в статус: last_error затирается первым же успешным
+            # заездом (_hop чистит его), а жалоба на испорченный квадрат нужна
+            # человеку целиком.
+            self.last_error = f"квадрат огня в теле /drive не разобран: {exc}"
+            say(f"квадрат огня в теле /drive не разобран: {exc}")
+
+    def clear_fire(self) -> dict:
+        """Забыть квадрат: диспетчер сообщает это, когда пожар потушен."""
+        with self._fire_lock:
+            was, self.fire = self.fire, None
+        say("пожар потушен — квадрат огня снят" if was else "квадрата огня и так не знал")
+        return {"ok": True, "accepted": True, "cleared": bool(was)}
+
+    def fire_view(self) -> dict | None:
+        """Квадрат для /status и GET /fire: принятое плюс свой возраст в секундах."""
+        fire = self.fire
+        if fire is None:
+            return None
+        return {**fire, "since": round(time.monotonic() - self._fire_t, 1)}
 
     # --- лента --------------------------------------------------------------
 
@@ -669,7 +999,11 @@ class Handler(BaseHTTPRequestHandler):
             return {}
         try:
             return json.loads(self.rfile.read(length) or b"{}")
-        except json.JSONDecodeError:
+        except ValueError:
+            # ValueError, а не json.JSONDecodeError: тело с битым байтом даёт
+            # UnicodeDecodeError, и на нём поток обработчика падал молча — клиент
+            # получал обрыв соединения вместо ответа. Искажённое тело должно
+            # приводить к внятному отказу, а не к потере связи.
             return {}
 
     def log_message(self, fmt: str, *args) -> None:
@@ -679,6 +1013,11 @@ class Handler(BaseHTTPRequestHandler):
         self.agent.touch()
         if self.path in ("/status", "/"):
             return self._json(200, self.agent.status())
+        if self.path == "/fire":
+            # «Не знаю» — это ответ, а не 404: спрашивают ровно затем, чтобы
+            # отличить «квадрат дошёл» от «не дошёл».
+            fire = self.agent.fire_view()
+            return self._json(200, {"ok": True, "known": fire is not None, "fire": fire})
         self._json(404, {"error": f"нет такого пути: {self.path}"})
 
     def do_POST(self) -> None:  # noqa: N802
@@ -687,8 +1026,24 @@ class Handler(BaseHTTPRequestHandler):
         cid = str(body.get("command_id") or "")
         try:
             if self.path == "/drive":
+                # Резервный канал квадрата огня (поля fire/fire_level в теле).
+                # Читается ДО дедупа и до проверки соседства: квадрат должен
+                # дойти даже с той команды переезда, которую агент отклонит.
+                self.agent.fire_from_drive(body)
                 return self._json(200, self.agent.once(
                     cid, lambda: self.agent.drive(body["cell"])))
+            if self.path == "/fire":
+                # Дедуп как у /stop. Замка «занят» здесь нет намеренно: квадрат
+                # обязан приниматься на ходу — диспетчер вправе уточнить его
+                # посреди заезда, и 409 на этом пути не бывает никогда.
+                return self._json(200, self.agent.once(
+                    cid, lambda: self.agent.set_fire(body)))
+            if self.path == "/goto":
+                # blocked — необязательный список временно закрытых клеток
+                # (клетка пожара, чужой аппарат): A* их обойдёт.
+                return self._json(200, self.agent.once(
+                    cid, lambda: self.agent.goto(
+                        body["cell"], body.get("blocked") or ())))
             if self.path == "/led":
                 # Лента синхронна: это короткая команда без фонового исполнения,
                 # и дедуп ей не нужен (повтор просто повторит тот же режим).
@@ -736,6 +1091,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--led-color", default="#FF0000", help="цвет ленты по умолчанию")
     p.add_argument("--led-brightness", type=float, default=0.35)
     p.add_argument("--led-speed", type=float, default=2.0, help="частота мигания, Гц")
+    # Поле для /goto: границы и клетки домов. Метры сюда не входят — их считает
+    # Anchor выше по своей калибровке.
+    p.add_argument("--config", default="",
+                   help="путь к city/config.yaml (поле и дома для /goto)")
+    p.add_argument("--no-field", action="store_true",
+                   help="не читать поле: /goto будет отказывать, /drive работает")
     p.add_argument("--dry", action="store_true",
                    help="без ровера: отвечать и «ездить» мгновенно")
     return p
@@ -752,7 +1113,8 @@ def main(argv: list[str] | None = None) -> int:
             args.rover_ip, args.ctrl_port, args.web_port, args.map_label,
             client_id=f"city-{args.name}",
         )
-    agent = Agent(args, backend, anchor)
+    field, field_why = load_field(args)
+    agent = Agent(args, backend, anchor, field, field_why)
 
     handler = type("Bound", (Handler,), {"agent": agent})
     try:
@@ -767,6 +1129,11 @@ def main(argv: list[str] | None = None) -> int:
     where = "ЗАГЛУШКА (--dry)" if args.dry else f"{args.rover_ip} (упр {args.ctrl_port}, веб {args.web_port})"
     say(f"агент ровера «{args.name}» слушает порт {args.port}, ровер: {where}")
     say(f"проверка: curl http://127.0.0.1:{args.port}/status")
+    if field is not None:
+        say(f"поле {field.cols}x{field.rows} клеток, домов {len(field.buildings)}: "
+            "/goto доедет до любой клетки в обход")
+    else:
+        say(f"/goto недоступен ({field_why}) — /drive по соседним клеткам работает")
     if not args.dry:
         time.sleep(args.poll_period + 0.2)  # дать фоновому опросу снять первый снимок
         snap = agent.status()

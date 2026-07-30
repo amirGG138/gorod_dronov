@@ -162,6 +162,96 @@ class TestDrone(HttpCase):
             self.robot.look([-0.7, -0.7], 1.5)
 
 
+class TestFireOverTheWire(unittest.TestCase):
+    """Оба /fire по сети: вопрос борту и сообщение роверу — разные ручки разных аппаратов."""
+
+    def setUp(self):
+        self.servers = []
+
+    def tearDown(self):
+        for server in self.servers:
+            server.shutdown()
+            server.server_close()
+
+    def robot(self, role, cell=(3, 3), name="", **kw):
+        server, _ = serve(role, 0, cell, name=name or role, move_time=0.01, quiet=True, **kw)
+        self.servers.append(server)
+        return HttpRobot(f"http://127.0.0.1:{server.server_address[1]}", name=name or role)
+
+    def test_the_board_verdict_arrives_as_it_is(self):
+        drone = self.robot("drone", (1, 1), "m1", fire_verdict={"found": True, "cell": [4, 2],
+                                                               "count": 3})
+        answer = drone.fire()
+        self.assertTrue(answer["found"])
+        self.assertEqual(answer["cell"], [4, 2])
+        self.assertEqual(answer["count"], 3)
+        self.assertEqual(answer["source"], "mock")  # имитацию видно в ответе
+
+    def test_a_board_without_a_verdict_refuses(self):
+        """«Не знаю» и «не вижу» — разные ответы, и вторым подменять первый нельзя."""
+        drone = self.robot("drone", (1, 1), "m2")
+        with self.assertRaises(RobotError) as ctx:
+            drone.fire()
+        self.assertIn("не задан", str(ctx.exception))
+
+    def test_the_square_reaches_the_rover_and_shows_in_status(self):
+        rover = self.robot("rover")
+        rover.tell_fire({"cell": [4, 2], "level": 3, "tower": [1, 3]})
+        fire = rover.status()["fire"]
+        self.assertEqual(fire["cell"], [4, 2])
+        self.assertEqual(fire["level"], 3)
+        self.assertEqual(fire["via"], "fire")
+
+    def test_reading_the_square_back(self):
+        rover = self.robot("rover")
+        url = f"http://127.0.0.1:{self.servers[-1].server_address[1]}"
+        with urllib.request.urlopen(f"{url}/fire", timeout=5) as resp:
+            self.assertFalse(json.loads(resp.read())["known"])
+        rover.tell_fire({"cell": [4, 2]})
+        with urllib.request.urlopen(f"{url}/fire", timeout=5) as resp:
+            read = json.loads(resp.read())
+        self.assertTrue(read["known"])
+        self.assertEqual(read["fire"]["cell"], [4, 2])
+
+    def test_the_backup_channel_rides_along_with_a_drive(self):
+        rover = self.robot("rover")
+        rover.drive([3, 2], fire=[4, 2], fire_level=2)
+        wait_until(rover, lambda st: not st["busy"])
+        fire = rover.status()["fire"]
+        self.assertEqual(fire["cell"], [4, 2])
+        self.assertEqual(fire["via"], "drive")
+
+    def test_an_old_end_refuses_the_dedicated_path_but_takes_the_backup(self):
+        """Ровно репетиция площадки: агент прошлой версии про /fire не знает.
+
+        404 не должен ни срывать попытку, ни лишать ровер знания: тот же квадрат
+        доезжает полями в теле /drive, которые агент любой версии просто не читает.
+        """
+        rover = self.robot("rover", no_fire=True)
+        with self.assertRaises(RobotError) as ctx:
+            rover.tell_fire({"cell": [4, 2]})
+        self.assertIn("404", str(ctx.exception))
+        rover.drive([3, 2], fire=[4, 2], fire_level=2)
+        wait_until(rover, lambda st: not st["busy"])
+        self.assertEqual(rover.status()["fire"]["cell"], [4, 2])
+
+    def test_a_board_of_an_old_version_answers_404_to_the_question(self):
+        drone = self.robot("drone", (1, 1), "m3", no_fire=True,
+                           fire_verdict={"found": True, "cell": [4, 2]})
+        with self.assertRaises(RobotError) as ctx:
+            drone.fire()
+        self.assertIn("404", str(ctx.exception))
+
+    def test_the_square_is_accepted_while_the_rover_moves(self):
+        """409 на этом пути не бывает: диспетчер вправе уточнить квадрат на ходу."""
+        server, _ = serve("rover", 0, (3, 3), move_time=0.6, quiet=True)
+        self.servers.append(server)
+        rover = HttpRobot(f"http://127.0.0.1:{server.server_address[1]}", name="rover")
+        rover.drive([3, 2])
+        wait_until(rover, lambda st: st["state"] == "moving", timeout=3)
+        self.assertTrue(rover.tell_fire({"cell": [4, 2]})["accepted"])
+
+
 class TestNoConnection(unittest.TestCase):
     def test_dead_address_gives_a_clear_error(self):
         robot = HttpRobot("http://127.0.0.1:9", name="потеряшка")

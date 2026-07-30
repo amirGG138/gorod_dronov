@@ -18,7 +18,12 @@ from city.rules import (
 )
 
 RULES = RuleSet()
-BUILDINGS = [(1, 1), (4, 1), (1, 4), (4, 4), (3, 1), (4, 2), (2, 4)]
+# Копия боевой раскладки из city/config.yaml. Именно копия, а не чтение конфига:
+# конфиг правят на площадке, и тесты правил от этого падать не должны.
+BUILDINGS = [(1, 1), (4, 1), (1, 4), (4, 4), (2, 1), (1, 2), (3, 4)]
+# Горящий дом сценария. Его соседи-дороги: [3,3], [2,4], [3,5]; ближайшая к башне
+# [1,3] — [2,4] (её и выбирает approach), поэтому в тестах ниже она дефолтная.
+FIRE = (3, 4)
 
 
 def field():
@@ -27,7 +32,7 @@ def field():
 
 def scenario(**kw):
     base = dict(
-        fire_cell=(4, 2),
+        fire_cell=FIRE,
         fire_level=2,
         tower=(1, 3),
         charge=(3, 3),
@@ -82,19 +87,19 @@ class TestDwell(unittest.TestCase):
 
 class TestFireRoute(unittest.TestCase):
     def test_level_equals_number_of_cycles(self):
-        route = fire_route(field(), (3, 3), (4, 2), 3, (1, 3), RULES)
+        route = fire_route(field(), (3, 3), FIRE, 3, (1, 3), RULES)
         dwells = [a for a in route.actions if a.dwell_kind == "water"]
         self.assertEqual(len(dwells), 3)
         self.assertTrue(all(a.seconds == 3.0 and a.led == "blink" for a in dwells))
 
     def test_rover_never_enters_the_fire_cell(self):
-        route = fire_route(field(), (3, 3), (4, 2), 2, (1, 3), RULES)
+        route = fire_route(field(), (3, 3), FIRE, 2, (1, 3), RULES)
         for action in route.actions:
-            self.assertNotIn((4, 2), action.path)
+            self.assertNotIn(FIRE, action.path)
 
     def test_zero_level_is_rejected(self):
         with self.assertRaises(RouteBlocked):
-            fire_route(field(), (3, 3), (4, 2), 0, (1, 3), RULES)
+            fire_route(field(), (3, 3), FIRE, 0, (1, 3), RULES)
 
 
 class TestPlanReasons(unittest.TestCase):
@@ -108,12 +113,12 @@ class TestPlanReasons(unittest.TestCase):
 
     def test_approach_cell_is_stated(self):
         reasons = plan_reasons(field(), scenario(), RULES)
-        spot = field().approach((4, 2), (1, 3))
+        spot = field().approach(FIRE, (1, 3))
         self.assertTrue(any(str(list(spot)) in r for r in reasons))
 
     def test_approach_from_the_model_is_the_one_explained(self):
         """Судье называется та клетка, на которую построен план, а не запасная."""
-        default = field().approach((4, 2), (1, 3))
+        default = field().approach(FIRE, (1, 3))
         other = next(c for c in approach_options(field(), scenario()) if c != default)
         reasons = plan_reasons(field(), scenario(), RULES, spot=other)
         text = " ".join(reasons)
@@ -159,22 +164,22 @@ class TestProposal(unittest.TestCase):
         return budget_for(field(), scenario(), spot, RULES)[0]
 
     def check(self, **over):
-        proposal = {"approach": [3, 2], "charge_budget": self.base_budget((3, 2))}
+        proposal = {"approach": [3, 3], "charge_budget": self.base_budget((3, 3))}
         proposal.update(over)
         return check_proposal(field(), scenario(), proposal, RULES)
 
     def test_options_start_with_the_deterministic_choice(self):
         options = approach_options(field(), scenario())
-        self.assertEqual(options[0], field().approach((4, 2), (1, 3)))
-        self.assertNotIn((4, 2), options)  # сама клетка пожара вариантом не бывает
+        self.assertEqual(options[0], field().approach(FIRE, (1, 3)))
+        self.assertNotIn(FIRE, options)  # сама клетка пожара вариантом не бывает
 
     def test_valid_proposal_is_accepted(self):
         verdict = self.check()
         self.assertTrue(verdict.ok, verdict.reason)
-        self.assertEqual(verdict.spot, (3, 2))
+        self.assertEqual(verdict.spot, (3, 3))
 
     def test_the_fire_cell_itself_is_refused(self):
-        verdict = self.check(approach=[4, 2])
+        verdict = self.check(approach=list(FIRE))
         self.assertFalse(verdict.ok)
         self.assertIn("въезжать нельзя", verdict.reason)
 
@@ -195,12 +200,12 @@ class TestProposal(unittest.TestCase):
 
     def test_wasteful_budget_is_refused(self):
         """Единица заряда это секунда стоянки, а попытка длится 15 минут."""
-        verdict = self.check(charge_budget=self.base_budget((3, 2)) * 3)
+        verdict = self.check(charge_budget=self.base_budget((3, 3)) * 3)
         self.assertFalse(verdict.ok)
         self.assertIn("удвоенного", verdict.reason)
 
     def test_small_extra_budget_is_allowed(self):
-        self.assertTrue(self.check(charge_budget=self.base_budget((3, 2)) + 2).ok)
+        self.assertTrue(self.check(charge_budget=self.base_budget((3, 3)) + 2).ok)
 
     def test_garbage_answers_do_not_crash(self):
         for junk in ("не объект", None, [1, 2], {"approach": "рядом", "charge_budget": 5}):
@@ -215,10 +220,10 @@ class TestProposal(unittest.TestCase):
 
     def test_chosen_spot_changes_the_route(self):
         """Принятая клетка действительно меняет план, иначе выбор был бы декорацией."""
-        actions, _, end = compile_plan(field(), scenario(), RULES, spot=(4, 3))
-        self.assertEqual(end, (4, 3))
+        actions, _, end = compile_plan(field(), scenario(), RULES, spot=(3, 5))
+        self.assertEqual(end, (3, 5))
         for action in actions:
-            self.assertNotIn((4, 2), action.path)
+            self.assertNotIn(FIRE, action.path)
 
 
 if __name__ == "__main__":

@@ -10,8 +10,9 @@ import threading
 import time
 from typing import Any
 
+from . import talk
 from .base import RobotError
-from .fake import FakeDrone, FakeRover, FakeVup
+from .fake import FakeDrone, FakeRover, FakeVup, parse_verdict
 from .http_robot import HttpRobot, wait_online
 
 STOP_TIMEOUT = 8.0  # сколько ждать «стоп» от одного аппарата, с
@@ -110,25 +111,45 @@ def _monitors_enabled(cfg) -> list[str]:
     ]
 
 
-def build_fleet(cfg, clock, transport: str | None = None) -> Fleet:
-    """Собрать флот по конфигу: `fake` — объекты в памяти, `http` — команды по сети."""
+def build_fleet(cfg, clock, transport: str | None = None, log=None) -> Fleet:
+    """Собрать флот по конфигу: `fake` — объекты в памяти, `http` — команды по сети.
+
+    log — журнал попытки. Передан: каждая команда аппарату оставит в нём событие MSG
+    (city/robots/talk.py), и обмен станет видно — этим живёт дашборд. Не передан:
+    обвязки нет вовсе, поведение прежнее. Обвязка живёт ровно здесь потому, что это
+    единственное место, где известны и все аппараты, и способ связи: диспетчер
+    получает объекты с одинаковыми методами и не должен знать, кто их слушает.
+    """
     transport = transport or cfg.get("robots.transport", "fake")
     if transport == "http":
-        return _build_http(cfg)
-    if transport != "fake":
+        fleet = _build_http(cfg)
+    elif transport == "fake":
+        fleet = _build_fake(cfg, clock)
+    else:
         raise ValueError(f"неизвестный способ связи {transport!r}: бывает fake или http")
-    return _build_fake(cfg, clock)
+    if log is not None:
+        for robot in fleet.all():
+            talk.attach(robot, log)
+    return fleet
 
 
 def _build_fake(cfg, clock) -> Fleet:
     move_time = float(cfg.get("sim.move_time", 1.2))
     scene = _scene(cfg)
+    # Бортовой вердикт про огонь у понарошечных дронов ЗАДАЁТСЯ ключом
+    # --sim-onboard-fire, а не считается: посчитанный тем же city/vision.py был бы
+    # фальшивым вторым источником — расхождений в симуляции не бывает по построению.
+    told = str(cfg.get("sim.onboard_fire", "") or "")
+    verdict = parse_verdict(told) if told else None
     rover = FakeRover(clock, cfg.cells.rover_start, move_time=move_time)
     vup = FakeVup(clock, cfg.cells.charge, scene=scene) if cfg.get("flags.use_vup", False) else None
     monitors = {}
     if cfg.get("flags.use_drones", False):
         for name in _monitors_enabled(cfg):
-            monitors[name] = FakeDrone(clock, cfg.robots.monitors[name].pad, name=name, scene=scene)
+            monitors[name] = FakeDrone(
+                clock, cfg.robots.monitors[name].pad, name=name, scene=scene,
+                fire_verdict=verdict,
+            )
     return Fleet(rover=rover, vup=vup, monitors=monitors, transport="fake")
 
 

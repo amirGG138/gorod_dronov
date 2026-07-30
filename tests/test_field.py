@@ -42,11 +42,13 @@ class TestGeometry(unittest.TestCase):
 
 class TestRouting(unittest.TestCase):
     def setUp(self):
-        # Реальная гипотеза поля: четыре пада-крыши + три дома без маркеров
+        # Копия боевой раскладки из city/config.yaml: четыре пада-крыши плюс три
+        # дома без маркеров. Именно копия, а не чтение конфига: конфиг правят на
+        # площадке, и тесты алгоритма от этого падать не должны.
         self.f = Field(
             size=(6, 6),
             cell=0.8,
-            buildings=[(1, 1), (4, 1), (1, 4), (4, 4), (3, 1), (4, 2), (2, 4)],
+            buildings=[(1, 1), (4, 1), (1, 4), (4, 4), (2, 1), (1, 2), (3, 4)],
         )
 
     def test_path_goes_around_buildings(self):
@@ -56,7 +58,7 @@ class TestRouting(unittest.TestCase):
             self.assertTrue(self.f.is_road(cell))
 
     def test_no_path_into_building(self):
-        self.assertIsNone(self.f.astar((3, 3), (4, 2)))
+        self.assertIsNone(self.f.astar((3, 3), (1, 2)))
 
     def test_blocked_cell_is_avoided(self):
         path = self.f.astar((3, 3), (1, 3), blocked=[(2, 3)])
@@ -68,9 +70,10 @@ class TestRouting(unittest.TestCase):
         self.assertIsNone(walled.astar((3, 3), (0, 0)))
 
     def test_approach_picks_cell_nearest_to_tower(self):
-        # к горящему дому [4,2] подъезжаем со стороны башни [1,3], а не с [5,2]
-        spot = self.f.approach((4, 2), prefer=(1, 3))
-        self.assertEqual(spot, (3, 2))
+        # к горящему дому [2,1] подъезжаем со стороны башни [1,3], то есть
+        # с [2,2] (два переезда), а не с [2,0] или [3,1] (по четыре)
+        spot = self.f.approach((2, 1), prefer=(1, 3))
+        self.assertEqual(spot, (2, 2))
         self.assertTrue(self.f.is_road(spot))
 
     def test_approach_none_when_surrounded(self):

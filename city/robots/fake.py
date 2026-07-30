@@ -74,10 +74,15 @@ class FakeRover(_Fake):
         super().__init__(clock, cell, name="rover")
         self.move_time = float(move_time)
         self.led_mode = "off"
+        # Квадрат огня: что диспетчер сказал про очаг. Только знание, не движение —
+        # как и у живого агента (rover/rover_agent.py, раздел «квадрат огня»).
+        self.fire: dict[str, Any] | None = None
 
     def status(self) -> dict[str, Any]:
         st = super().status()
         st["led"] = self.led_mode
+        if self.fire is not None:
+            st["fire"] = dict(self.fire)
         return st
 
     def check_drive(self, cell: Sequence[int]) -> Cell:
@@ -93,8 +98,21 @@ class FakeRover(_Fake):
             raise RobotError("rover: уже едет, вторая команда движения отклонена")
         return target
 
-    def drive(self, cell: Sequence[int]) -> dict[str, Any]:
+    def drive(
+        self,
+        cell: Sequence[int],
+        fire: Sequence[int] | None = None,
+        fire_level: int | None = None,
+    ) -> dict[str, Any]:
         """Переезд ровно в соседнюю клетку: так же считается игровой заряд."""
+        # Резервный канал квадрата огня читается ДО проверки соседства: квадрат
+        # обязан дойти даже с той команды переезда, которую ровер отклонит.
+        # Зовём внутренний _set_fire, а НЕ свой же публичный tell_fire: последний
+        # обвязан журналом (city/robots/talk.py), и внутренний вызов попадал бы в
+        # ленту обмена отдельным сообщением — на дашборде выглядело так, будто
+        # диспетчер повторяет квадрат на каждом переезде.
+        if fire is not None:
+            self._set_fire({"cell": fire, "level": fire_level}, via="drive")
         target = self.check_drive(cell)
         if target != self.cell:
             self._step(target, self.move_time)
@@ -106,14 +124,60 @@ class FakeRover(_Fake):
         self.led_mode = mode
         return {"accepted": True, "led": mode}
 
+    def tell_fire(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Запомнить квадрат огня, присланный основным каналом (POST /fire)."""
+        return self._set_fire(payload, via="fire")
+
+    def _set_fire(self, payload: dict[str, Any], via: str = "fire") -> dict[str, Any]:
+        """Общее тело для обоих каналов доставки квадрата. Мок придирчив как железо.
+
+        Правило слияния то же, что у живого агента: основной канал (/fire) главнее
+        резервного (тело /drive), потому что резервный беднее — level и ориентиры в
+        нём не летят. Повтор того же очага резервным каналом дополняет пропуски, а не
+        затирает известное, и возраст квадрата не сбрасывает.
+        """
+        if payload.get("clear"):
+            was, self.fire = self.fire, None
+            return {"accepted": True, "cleared": bool(was)}
+        try:
+            cell = as_cell(payload["cell"])
+        except (TypeError, ValueError, IndexError) as exc:
+            raise RobotError(
+                f"rover: клетка пожара задаётся парой чисел — получено {payload.get('cell')!r}"
+            ) from exc
+        fresh: dict[str, Any] = {"cell": list(cell), "via": via}
+        for key in ("level", "tower", "approach", "charge", "source"):
+            if payload.get(key) is not None:
+                fresh[key] = payload[key]
+        known = self.fire
+        if via == "drive" and known is not None and known["cell"] == fresh["cell"]:
+            self.fire = {**fresh, **known}
+        else:
+            self.fire = fresh
+        return {"accepted": True, "fire": dict(self.fire)}
+
 
 class FakeDrone(_Fake):
     role = "drone"
 
-    def __init__(self, clock, cell: Sequence[int] = (1, 1), name: str = "m1", scene=None) -> None:
+    def __init__(
+        self,
+        clock,
+        cell: Sequence[int] = (1, 1),
+        name: str = "m1",
+        scene=None,
+        fire_verdict: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(clock, cell, name=name)
         self.alt = 0.0
         self.pad: Cell = as_cell(cell)
+        # Бортовой вердикт про огонь — ЗАДАННЫЙ, а не посчитанный. Считать его тем
+        # же city/vision.py было бы фальшивой независимостью: расхождений в
+        # симуляции не бывает по построению, и «второй источник» развалился бы от
+        # первого вопроса судьи. Здесь вердикт подставляют руками (ключ --fire у
+        # mock_server, --sim-onboard-fire у city.run), в ответе стоит source=mock,
+        # и спутать имитацию с детекцией нельзя.
+        self.fire_verdict = fire_verdict
         # scene — нарисованный мир (city/robots/scene.py). Есть он — дрон «снимает»
         # поле с той точки, где висит; нет — отдаёт заглушку. Дрон о содержимом
         # сцены ничего не знает: очаг на кадре ищет уже диспетчер.
@@ -189,12 +253,67 @@ class FakeDrone(_Fake):
                 return frame
         return BLANK_JPEG
 
+    def fire(self) -> dict[str, Any]:
+        """Свой вердикт про огонь. Не настроен — отказ, а не «огня нет».
+
+        Разница принципиальная: «не знаю» и «не вижу» — разные ответы, и вторым
+        подменять первый нельзя. Живой борт различает их так же (в режиме --dry он
+        отвечает dry:true, а не found:false как факт).
+        """
+        if self.fire_verdict is None:
+            raise Unsupported(
+                f"{self.name}: свой разбор огня не задан — вердикта нет "
+                "(задаётся ключом --fire у mock_server или --sim-onboard-fire)"
+            )
+        if self.state not in ("hover", "idle"):
+            # Борт снимает на этот запрос свежий кадр, значит во время манёвра
+            # вердикт был бы по смазанной картинке.
+            raise RobotError(f"{self.name}: вердикт про огонь во время манёвра")
+        return {**self.fire_verdict, "source": "mock", "at": round(self.clock.now(), 1)}
+
 
 class FakeVup(FakeDrone):
     role = "vup"
 
-    def __init__(self, clock, cell: Sequence[int] = (3, 3), name: str = "vup", scene=None) -> None:
-        super().__init__(clock, cell, name=name, scene=scene)
+    def __init__(
+        self,
+        clock,
+        cell: Sequence[int] = (3, 3),
+        name: str = "vup",
+        scene=None,
+        fire_verdict: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(clock, cell, name=name, scene=scene, fire_verdict=fire_verdict)
 
 
-__all__ = ["FakeRover", "FakeDrone", "FakeVup", "BLANK_JPEG", "RobotError", "Unsupported"]
+def parse_verdict(text: str) -> dict[str, Any]:
+    """«4,2x3» -> заданный вердикт борта про огонь. Пустая строка — вердикта нет.
+
+    Формат нарочно короткий: его набирают руками в ключе командной строки, когда
+    надо проверить обе ветки сверки — согласие и расхождение с разбором диспетчера.
+    """
+    body = text.strip().lower()
+    if not body or body in ("нет", "none", "-"):
+        return {"found": False}
+    cell, _, count = body.partition("x")
+    col, _, row = cell.partition(",")
+    verdict: dict[str, Any] = {
+        "found": True,
+        "cell": [int(col), int(row)],
+        "anchor": "marker",
+    }
+    if count:
+        verdict["count"] = int(count)
+        verdict["count_source"] = "blobs"
+    return verdict
+
+
+__all__ = [
+    "FakeRover",
+    "FakeDrone",
+    "FakeVup",
+    "BLANK_JPEG",
+    "RobotError",
+    "Unsupported",
+    "parse_verdict",
+]

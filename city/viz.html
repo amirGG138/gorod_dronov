@@ -1,0 +1,522 @@
+<!doctype html>
+<!--
+  Страница дашборда. Правится на площадке чаще, чем сервер, поэтому лежит отдельным
+  файлом рядом с city/viz.py. Без сборки, без CDN, без внешних шрифтов: на площадке
+  интернета может не быть вовсе.
+
+  Всё состояние собирается из журнала попытки одним редьюсером (функция apply ниже):
+  тип события -> изменение состояния. Отображаемые имена и цвета живут только здесь —
+  в самом журнале ключи английские, так требует city/log.py.
+-->
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Город дронов — обмен</title>
+<style>
+  :root {
+    --bg: #10141c; --panel: #171d28; --edge: #263041; --ink: #dde5f2;
+    --dim: #8794aa; --road: #1d2532; --house: #2f3a4d; --pad: #2b3f5e;
+    --fire: #e04a3a; --water: #3d7fd0; --charge: #d8a72c; --rover: #46c98a;
+    --drone: #6fa8ff; --ok: #46c98a; --bad: #e0614a;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.45 "Segoe UI", system-ui, sans-serif;
+  }
+  header {
+    display: flex; gap: 16px; align-items: baseline; flex-wrap: wrap;
+    padding: 10px 16px; border-bottom: 1px solid var(--edge); background: var(--panel);
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .04em; }
+  .grow { flex: 1; }
+  .chip {
+    padding: 2px 8px; border: 1px solid var(--edge); border-radius: 10px;
+    font-size: 12px; color: var(--dim);
+  }
+  .chip b { color: var(--ink); font-weight: 600; }
+  .chip.live { border-color: var(--ok); color: var(--ok); }
+  .chip.done { border-color: var(--dim); }
+  .chip.replay { border-color: var(--charge); color: var(--charge); font-weight: 700; }
+  button, select {
+    background: var(--road); color: var(--ink); border: 1px solid var(--edge);
+    border-radius: 6px; padding: 4px 10px; font: inherit; font-size: 12px; cursor: pointer;
+  }
+  button:hover { border-color: var(--dim); }
+
+  main {
+    display: grid; grid-template-columns: minmax(380px, 46fr) minmax(340px, 54fr);
+    gap: 14px; padding: 14px; align-items: start;
+  }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--edge); border-radius: 10px;
+    overflow: hidden;
+  }
+  .card > h2 {
+    margin: 0; padding: 8px 12px; font-size: 12px; letter-spacing: .08em;
+    text-transform: uppercase; color: var(--dim); border-bottom: 1px solid var(--edge);
+  }
+  .card > .body { padding: 12px; }
+
+  /* --- поле ------------------------------------------------------------- */
+  .fieldwrap { position: relative; }
+  .field {
+    display: grid; gap: 3px; aspect-ratio: 1 / 1;
+  }
+  .cell {
+    position: relative; background: var(--road); border-radius: 4px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; color: var(--dim);
+  }
+  /* Дома надо отличать от дороги с первого взгляда: по ним ровер не ездит, и
+     именно в доме горит. Одного оттенка фона для этого мало. */
+  .cell.house {
+    background: var(--house);
+    background-image: repeating-linear-gradient(45deg,
+      #ffffff0d 0 4px, transparent 4px 8px);
+  }
+  /* Площадка — это крыша дома, значит роверу в неё тоже нельзя: штриховка та же. */
+  .cell.pad {
+    background: var(--pad); box-shadow: inset 0 0 0 1px #46618c;
+    background-image: repeating-linear-gradient(45deg,
+      #ffffff0d 0 4px, transparent 4px 8px);
+  }
+  .cell.tower { background: #1d3350; }
+  .cell.charge { background: #3a3116; }
+  .cell.approach { box-shadow: inset 0 0 0 2px #46c98a88; }
+  .cell.fire { background: #4a1f1a; box-shadow: inset 0 0 0 2px var(--fire); }
+  .cell .tag { position: absolute; top: 2px; left: 4px; font-size: 9px; opacity: .75; }
+  .cell .mid { font-size: 11px; text-align: center; line-height: 1.2; }
+  .cell.fire .mid { color: #ffb0a4; font-weight: 700; }
+  .dots { letter-spacing: 1px; }
+  .district { position: absolute; inset: auto 3px 3px auto; width: 6px; height: 6px; border-radius: 50%; }
+
+  .token {
+    position: absolute; width: 9%; height: 9%; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 9px; font-weight: 700; color: #06222c;
+    transition: left .5s ease, bottom .5s ease;
+  }
+  .token.rover { background: var(--rover); box-shadow: 0 0 0 2px #0d3b2a, 0 0 12px #46c98a66; }
+  .token.drone { background: var(--drone); width: 7%; height: 7%; color: #0a2242; opacity: .55; }
+  .token.drone.air { opacity: 1; box-shadow: 0 0 0 2px #123, 0 0 10px #6fa8ff88; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; font-size: 11px; color: var(--dim); }
+  .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 3px; margin-right: 4px; vertical-align: -1px; }
+
+  /* --- ленты ------------------------------------------------------------ */
+  .feed { max-height: 42vh; overflow-y: auto; font-size: 12px; }
+  .feed .row { padding: 4px 12px; border-bottom: 1px solid #1e2634; display: flex; gap: 8px; }
+  .feed .row:last-child { border-bottom: 0; }
+  .t { color: var(--dim); font-variant-numeric: tabular-nums; min-width: 46px; text-align: right; }
+  .who { min-width: 92px; color: var(--drone); white-space: nowrap; }
+  .who.out { color: var(--rover); }
+  .what { flex: 1; }
+  .what .args { color: var(--dim); }
+  .row.bad .what { color: var(--bad); }
+  .ms { color: #5d6a80; font-size: 11px; }
+
+  .why { max-height: 40vh; overflow-y: auto; }
+  .why .row { padding: 6px 12px; border-bottom: 1px solid #1e2634; }
+  .why .kind {
+    display: inline-block; font-size: 10px; letter-spacing: .06em; padding: 1px 6px;
+    border-radius: 8px; background: var(--road); color: var(--dim); margin-right: 6px;
+  }
+  .why .kind.fire { background: #4a1f1a; color: #ffb0a4; }
+  .why .kind.plan { background: #1d3350; color: #b7d4ff; }
+  .why .kind.bad { background: #4a1f1a; color: #ffc9c0; }
+  .why .text { color: var(--ink); }
+  .why .text small { color: var(--dim); }
+
+  .shots { display: flex; gap: 8px; overflow-x: auto; padding: 12px; }
+  .shots figure { margin: 0; flex: 0 0 auto; text-align: center; }
+  .shots img {
+    height: 88px; border-radius: 6px; border: 1px solid var(--edge); display: block;
+    background: var(--road);
+  }
+  .shots figcaption { font-size: 10px; color: var(--dim); margin-top: 3px; }
+  .empty { padding: 12px; color: var(--dim); font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>ГОРОД ДРОНОВ · ОБМЕН</h1>
+  <span class="chip" id="run">лог: —</span>
+  <span class="chip" id="clock">t = 0.0 с</span>
+  <span class="chip" id="state">ждём прогон</span>
+  <span class="chip replay" id="replayChip" hidden>ПОВТОР</span>
+  <span class="grow"></span>
+  <select id="runPick" title="какой прогон показывать"></select>
+  <button id="replayBtn" title="проиграть уже полученные события в темпе прогона">повтор ×4</button>
+</header>
+
+<main>
+  <section class="card">
+    <h2>Поле 6×6 <span id="fieldSrc" style="text-transform:none;letter-spacing:0"></span></h2>
+    <div class="body">
+      <div class="fieldwrap">
+        <div class="field" id="field"></div>
+        <div id="tokens"></div>
+      </div>
+      <div class="legend">
+        <span><i style="background:var(--house)"></i>дом</span>
+        <span><i style="background:var(--pad)"></i>площадка монитора</span>
+        <span><i style="background:#1d3350"></i>башня</span>
+        <span><i style="background:#3a3116"></i>зарядка</span>
+        <span><i style="background:var(--fire)"></i>очаг</span>
+        <span><i style="background:var(--rover)"></i>ровер</span>
+        <span><i style="background:var(--drone)"></i>монитор</span>
+        <span>row 0 внизу: ось Y вверх, как в координатах поля</span>
+      </div>
+    </div>
+  </section>
+
+  <div style="display:grid;gap:14px">
+    <section class="card">
+      <h2>Обмен между агентами <span id="msgCount" style="text-transform:none"></span></h2>
+      <div class="feed" id="feed"><div class="empty">пока тихо</div></div>
+    </section>
+
+    <section class="card">
+      <h2>Решения и причины</h2>
+      <div class="why" id="why"><div class="empty">решений ещё не было</div></div>
+    </section>
+
+    <section class="card">
+      <h2>Кадры-доказательства</h2>
+      <div class="shots" id="shots"><div class="empty">кадров ещё нет</div></div>
+    </section>
+  </div>
+</main>
+
+<script>
+"use strict";
+
+// Как зовём агентов на экране. В журнале ключи английские (правило city/log.py),
+// а перевод живёт здесь.
+const RU = { rover: "ровер", vup: "ВУП" };
+const KIND_RU = {
+  RUN_START: "старт", ROBOT: "перекличка", SCAN: "кадр", FIRE_CHECK: "сверка",
+  FIRE_SPOTTED: "очаг", FIRE_TARGET: "квадрат роверу", SURVEY: "разведка",
+  PLAN_CHOSEN: "план", PLAN: "план", LLM: "модель", CHARGED: "зарядка",
+  DWELL: "стоянка", LED: "лента", FIRE_CYCLE: "цикл тушения",
+  FIRE_EXTINGUISHED: "потушено", PERSON_FOUND: "человек", VUP_ABSENT: "ВУП",
+  ENERGY_BLOCK: "заряд", SAFETY: "безопасность", ERROR: "сбой", DONE: "итог",
+};
+// MOVE и MSG в правую колонку не идут: первый виден на поле, второй — в ленте обмена.
+const SKIP_WHY = new Set(["MOVE", "MSG"]);
+
+const S = {
+  layout: null, fromConfig: null, layoutSource: "",
+  rover: null, fire: null, fireLevel: null, approach: null, fireOut: false,
+  roverKnows: null, drones: {}, msgs: [], why: [], shots: [],
+  t: 0, finished: false, seenAt: 0, run: "",
+};
+
+const el = (id) => document.getElementById(id);
+const cellKey = (c) => (c ? c[0] + "," + c[1] : "");
+const fmtCell = (c) => (c ? "[" + c[0] + "," + c[1] + "]" : "—");
+
+// ---- разбор события: единственное место, где журнал превращается в состояние ----
+function apply(e) {
+  if (typeof e.t === "number") S.t = e.t;
+  S.seenAt = Date.now();
+  switch (e.type) {
+    case "RUN_START":
+      reset(e.layout || null);
+      break;
+    case "ROBOT":
+      if (e.role === "rover" && e.cell) S.rover = e.cell;
+      if (e.role === "drone" && e.name) drone(e.name).seen = true;
+      break;
+    case "MSG": {
+      S.msgs.push(e);
+      if (S.msgs.length > 400) S.msgs.shift();
+      const who = e.dir === "out" ? e.to : e.frm;
+      if (who && who !== "rover" && who !== "vup") {
+        const d = drone(who);
+        if (e.verb === "takeoff" && e.ok) d.air = true;
+        if (e.verb === "land" && e.ok) d.air = false;
+        if (e.verb === "fire") d.verdict = e.ok ? e.answer : null;
+      }
+      break;
+    }
+    case "SCAN":
+      if (e.shot) {
+        S.shots.push({ drone: e.drone, path: e.shot, t: e.t, cell: e.fire_cell });
+        if (S.shots.length > 24) S.shots.shift();
+      }
+      break;
+    case "FIRE_SPOTTED":
+      S.fire = e.cell; S.fireLevel = e.level; S.fireOut = false;
+      break;
+    case "FIRE_TARGET":
+      if (e.ok) { S.roverKnows = e.clear ? null : e.cell; if (e.approach) S.approach = e.approach; }
+      break;
+    case "FIRE_EXTINGUISHED":
+      S.fireOut = true;
+      break;
+    case "MOVE":
+      if (e.cell) S.rover = e.cell;
+      break;
+    case "DONE": case "ERROR":
+      if (e.type === "DONE") S.finished = true;
+      break;
+  }
+  if (!SKIP_WHY.has(e.type) && e.reason) {
+    S.why.push(e);
+    if (S.why.length > 200) S.why.shift();
+  }
+}
+
+function drone(name) {
+  if (!S.drones[name]) S.drones[name] = { air: false, seen: false, verdict: null };
+  return S.drones[name];
+}
+
+function reset(layout) {
+  Object.assign(S, {
+    rover: null, fire: null, fireLevel: null, approach: null, fireOut: false,
+    roverKnows: null, drones: {}, msgs: [], why: [], shots: [], t: 0, finished: false,
+  });
+  if (layout) { S.layout = layout; S.layoutSource = "из журнала прогона"; }
+  else if (S.fromConfig) { S.layout = S.fromConfig; S.layoutSource = "из текущего config.yaml"; }
+  if (S.layout && S.layout.rover_start) S.rover = S.layout.rover_start;
+}
+
+// ---- отрисовка --------------------------------------------------------------
+function drawField() {
+  const L = S.layout;
+  const host = el("field");
+  if (!L) { host.innerHTML = ""; return; }
+  const [cols, rows] = L.size || [6, 6];
+  host.style.gridTemplateColumns = `repeat(${cols}, 1fr)`;
+  host.style.gridTemplateRows = `repeat(${rows}, 1fr)`;
+
+  const houses = new Set((L.buildings || []).map(cellKey));
+  const pads = {};
+  for (const [mid, c] of Object.entries(L.pads || {})) pads[cellKey(c)] = mid;
+  const monitors = {};
+  for (const [name, c] of Object.entries(L.monitors || {})) monitors[cellKey(c)] = name;
+  const districts = {};
+  for (const [color, c] of Object.entries(L.districts || {})) districts[cellKey(c)] = color;
+
+  let html = "";
+  // row 0 рисуется внизу: ось Y смотрит вверх, как в координатах поля.
+  for (let row = rows - 1; row >= 0; row--) {
+    for (let col = 0; col < cols; col++) {
+      const key = col + "," + row;
+      const cls = ["cell"];
+      let mid = "", tag = "";
+      if (houses.has(key)) cls.push("house");
+      if (pads[key] !== undefined) { cls.push("pad"); tag = "id " + pads[key]; }
+      if (cellKey(L.tower) === key) { cls.push("tower"); mid = "БАШНЯ"; }
+      if (cellKey(L.charge) === key) { cls.push("charge"); mid = "ЗАРЯДКА"; }
+      if (monitors[key]) tag = monitors[key].toUpperCase() + (tag ? " · " + tag : "");
+      if (S.fire && cellKey(S.fire) === key) {
+        cls.push("fire");
+        const dots = "•".repeat(Math.max(0, S.fireLevel || 0));
+        mid = (S.fireOut ? "потушен" : "~ОГОНЬ~") + (dots ? `<div class="dots">${dots}</div>` : "");
+      }
+      if (S.approach && cellKey(S.approach) === key) cls.push("approach");
+      const dot = districts[key]
+        ? `<span class="district" style="background:${cssColor(districts[key])}"></span>` : "";
+      html += `<div class="${cls.join(" ")}" title="[${col},${row}]">`
+            + (tag ? `<span class="tag">${tag}</span>` : "")
+            + (mid ? `<span class="mid">${mid}</span>` : "") + dot + "</div>";
+    }
+  }
+  host.innerHTML = html;
+  drawTokens(cols, rows);
+  el("fieldSrc").textContent = S.layoutSource ? "· " + S.layoutSource : "";
+}
+
+function cssColor(name) {
+  return { yellow: "#d8c72c", red: "#e04a3a", blue: "#3d7fd0", green: "#46c98a" }[name] || "#888";
+}
+
+// Токены НЕ пересоздаются на каждой отрисовке, а переиспользуются по ключу. Иначе
+// каждый кадр рождал бы новый элемент, а новорождённому элементу браузер CSS-переход
+// не проигрывает — и ровер прыгал бы по клеткам вместо того, чтобы переезжать.
+function drawTokens(cols, rows) {
+  const host = el("tokens");
+  const alive = new Set();
+  const put = (key, cell, cls, label, title) => {
+    if (!cell) return;
+    alive.add(key);
+    let node = host.querySelector(`[data-token="${key}"]`);
+    if (!node) {
+      node = document.createElement("div");
+      node.dataset.token = key;
+      node.textContent = label;
+      host.appendChild(node);
+    }
+    node.className = "token " + cls;
+    node.title = title;
+    // Проценты, а не пиксели: размер поля зависит от окна, а переход — от left/bottom.
+    node.style.left = `calc(${((cell[0] + 0.5) / cols) * 100}% - 4.5%)`;
+    node.style.bottom = `calc(${((cell[1] + 0.5) / rows) * 100}% - 4.5%)`;
+  };
+  for (const [name, cell] of Object.entries((S.layout || {}).monitors || {})) {
+    const d = S.drones[name] || {};
+    const verdict = d.verdict && d.verdict.cell ? `, вердикт ${fmtCell(d.verdict.cell)}` : "";
+    put(name, cell, "drone" + (d.air ? " air" : ""), name.replace(/[^0-9]/g, "") || "M",
+        `${name}: ${d.air ? "в воздухе" : "на площадке"}${verdict}`);
+  }
+  put("rover", S.rover, "rover", "RV",
+      `ровер ${fmtCell(S.rover)}`
+      + (S.roverKnows ? `, знает очаг ${fmtCell(S.roverKnows)}` : ", очага не знает"));
+  for (const node of [...host.children]) {
+    if (!alive.has(node.dataset.token)) node.remove();
+  }
+}
+
+function drawFeed() {
+  const host = el("feed");
+  if (!S.msgs.length) { host.innerHTML = '<div class="empty">пока тихо</div>'; return; }
+  const near = host.scrollTop + host.clientHeight >= host.scrollHeight - 24;
+  host.innerHTML = S.msgs.slice(-120).map((m) => {
+    const args = m.args ? Object.entries(m.args).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(" ") : "";
+    const ans = m.answer ? Object.entries(m.answer).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(" ") : "";
+    return `<div class="row ${m.ok === false ? "bad" : ""}">`
+      + `<span class="t">${(m.t ?? 0).toFixed(1)}</span>`
+      + `<span class="who ${m.dir}">${name(m.frm)} → ${name(m.to)}</span>`
+      + `<span class="what"><b>${m.verb}</b> <span class="args">${esc(args)}</span>`
+      + (ans ? ` <span class="args">→ ${esc(ans)}</span>` : "")
+      + (m.ok === false ? ` <br><span>${esc(m.error || "отказ")}</span>` : "")
+      + `</span><span class="ms">${m.ms ?? 0}мс</span></div>`;
+  }).join("");
+  if (near) host.scrollTop = host.scrollHeight;
+  el("msgCount").textContent = "· " + S.msgs.length;
+}
+
+function drawWhy() {
+  const host = el("why");
+  if (!S.why.length) { host.innerHTML = '<div class="empty">решений ещё не было</div>'; return; }
+  const near = host.scrollTop + host.clientHeight >= host.scrollHeight - 24;
+  host.innerHTML = S.why.slice(-80).map((e) => {
+    let kind = "";
+    if (e.type.startsWith("FIRE")) kind = "fire";
+    else if (e.type === "PLAN" || e.type === "PLAN_CHOSEN" || e.type === "LLM") kind = "plan";
+    else if (e.type === "ERROR" || e.type === "SAFETY" || e.type === "ENERGY_BLOCK") kind = "bad";
+    return `<div class="row"><span class="t">${(e.t ?? 0).toFixed(1)}</span>`
+      + `<span class="kind ${kind}">${KIND_RU[e.type] || e.type}</span>`
+      + `<span class="text">${esc(e.reason)}</span></div>`;
+  }).join("");
+  if (near) host.scrollTop = host.scrollHeight;
+}
+
+function drawShots() {
+  const host = el("shots");
+  if (!S.shots.length) { host.innerHTML = '<div class="empty">кадров ещё нет</div>'; return; }
+  host.innerHTML = S.shots.slice(-12).map((s) => {
+    const url = "/api/shot?path=" + encodeURIComponent(s.path);
+    return `<figure><a href="${url}" target="_blank" rel="noopener">`
+      + `<img src="${url}" alt="кадр ${esc(s.drone)}" loading="lazy"></a>`
+      + `<figcaption>${esc(s.drone)} · ${(s.t ?? 0).toFixed(1)}с`
+      + (s.cell ? ` · ${fmtCell(s.cell)}` : "") + `</figcaption></figure>`;
+  }).join("");
+}
+
+function drawHead() {
+  el("clock").textContent = "t = " + S.t.toFixed(1) + " с";
+  el("run").innerHTML = "лог: <b>" + esc(S.run || "—") + "</b>";
+  const st = el("state");
+  const quiet = S.seenAt ? (Date.now() - S.seenAt) / 1000 : 0;
+  if (S.finished) { st.className = "chip done"; st.textContent = "попытка завершена"; }
+  else if (!S.run) { st.className = "chip"; st.textContent = "ждём прогон"; }
+  else { st.className = "chip live"; st.textContent = "идёт · тишина " + quiet.toFixed(0) + " с"; }
+}
+
+let dirty = true;
+function draw() {
+  if (!dirty) return;
+  dirty = false;
+  drawField(); drawFeed(); drawWhy(); drawShots();
+}
+setInterval(() => { draw(); drawHead(); }, 300);
+
+const name = (who) => RU[who] || who || "?";
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+}
+
+// ---- поток событий ----------------------------------------------------------
+const raw = [];  // всё полученное: нужно для повтора
+let replaying = false;
+
+function feed(line) {
+  let e;
+  try { e = JSON.parse(line); } catch (_) { return; }  // половина строки — пропускаем
+  if (e.kind === "run") {                              // сменился файл прогона
+    S.run = e.run || "";
+    raw.length = 0;
+    reset(null);
+    dirty = true;
+    return;
+  }
+  raw.push(e);
+  if (!replaying) { apply(e); dirty = true; }
+}
+
+function connect() {
+  const src = new EventSource("/api/stream" + location.search);
+  src.onmessage = (m) => feed(m.data);
+  src.onerror = () => { /* браузер переподключится сам — для этого и SSE */ };
+}
+
+async function boot() {
+  try {
+    const r = await fetch("/api/field");
+    const f = await r.json();
+    if (!f.error) { S.fromConfig = f; if (!S.layout) reset(null); }
+  } catch (_) { /* без раскладки страница всё равно покажет ленту */ }
+  try {
+    const r = await fetch("/api/runs");
+    const data = await r.json();
+    const pick = el("runPick");
+    pick.innerHTML = '<option value="">самый свежий</option>'
+      + data.runs.map((x) => `<option value="${esc(x.run)}">${esc(x.run)}</option>`).join("");
+    pick.value = new URLSearchParams(location.search).get("run") || "";
+    pick.onchange = () => {
+      location.search = pick.value ? "?run=" + encodeURIComponent(pick.value) : "";
+    };
+  } catch (_) { /* список прогонов — удобство, не необходимость */ }
+  dirty = true;
+  connect();
+}
+
+// ---- повтор ----------------------------------------------------------------
+// Пейсинг делается на клиенте, а не на сервере: клиентов может быть несколько, и
+// каждый вправе смотреть в своём темпе. Плашка ПОВТОР при этом горит обязательно —
+// записанный прогон нельзя показывать так, будто он живой.
+el("replayBtn").onclick = async () => {
+  if (replaying || !raw.length) return;
+  replaying = true;
+  el("replayChip").hidden = false;
+  const events = raw.slice();
+  reset(S.layout && S.layoutSource === "из журнала прогона" ? S.layout : null);
+  dirty = true;
+  const speed = 4;
+  let prev = events[0].t ?? 0;
+  for (const e of events) {
+    const wait = Math.min(2, Math.max(0, ((e.t ?? prev) - prev) / speed));
+    prev = e.t ?? prev;
+    if (wait) await new Promise((r) => setTimeout(r, wait * 1000));
+    apply(e);
+    dirty = true;
+  }
+  replaying = false;
+  el("replayChip").hidden = true;
+  // Догоняем то, что пришло по сети во время повтора.
+  reset(S.layout);
+  for (const e of raw) apply(e);
+  dirty = true;
+};
+
+boot();
+</script>
+</body>
+</html>

@@ -6,6 +6,12 @@
 
     python3 -m city.robots.mock_server --role rover  --port 8010
     python3 -m city.robots.mock_server --role drone  --port 8020 --cell 1,1 --name m1
+
+Бортовой вердикт про огонь у дрона ЗАДАЁТСЯ, а не считается: «--fire 4,2x3» —
+очаг в клетке [4,2], огоньков три. Без ключа GET /fire честно отказывает, потому
+что «не знаю» и «не вижу» — разные ответы. Ключ --no-fire отвечает на /fire кодом
+404: так репетируется аппарат прошлой версии, на котором попытка обязана пройти
+целиком.
 """
 
 from __future__ import annotations
@@ -17,7 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from ..clock import RealClock
 from .base import RobotError
-from .fake import FakeDrone, FakeRover, FakeVup
+from .fake import FakeDrone, FakeRover, FakeVup, parse_verdict
 
 ROLES = {"rover": FakeRover, "drone": FakeDrone, "vup": FakeVup}
 
@@ -34,6 +40,7 @@ class _Handler(BaseHTTPRequestHandler):
     dedup: dict = {}
     dedup_lock = threading.Lock()
     quiet = False
+    no_fire = False  # отвечать 404 на оба /fire: репетиция «на площадке старый конец»
 
     # --- ответы -------------------------------------------------------------
 
@@ -58,7 +65,9 @@ class _Handler(BaseHTTPRequestHandler):
             return {}
         try:
             return json.loads(self.rfile.read(length) or b"{}")
-        except json.JSONDecodeError as exc:
+        except ValueError as exc:
+            # ValueError, а не json.JSONDecodeError: тело с битым байтом даёт
+            # UnicodeDecodeError, и мок падал там, где борт обязан ответить 400.
             raise RobotError(f"тело запроса не разобрать: {exc}") from exc
 
     def log_message(self, fmt: str, *args) -> None:
@@ -68,12 +77,24 @@ class _Handler(BaseHTTPRequestHandler):
     # --- маршруты -----------------------------------------------------------
 
     def do_GET(self) -> None:  # noqa: N802 — имя задано http.server
+        if self.no_fire and self.path == "/fire":
+            # Репетиция площадки: аппарат прошлой версии, ничего про /fire не
+            # знающий. Диспетчер обязан пройти попытку целиком и на таком.
+            return self._json(404, {"error": "нет такого пути: /fire"})
         try:
             with self.lock:
                 if self.path == "/status":
                     return self._json(200, self.robot.status())
                 if self.path == "/shot":
                     return self._bytes(200, self.robot.shot(), "image/jpeg")
+                if self.path == "/fire":
+                    if self.robot.role == "rover":
+                        # У ровера /fire читается: «знаю ли я, где горит».
+                        fire = getattr(self.robot, "fire", None)
+                        return self._json(
+                            200, {"ok": True, "known": fire is not None, "fire": fire}
+                        )
+                    return self._json(200, self._method("fire")())
         except RobotError as exc:
             return self._json(400, {"error": str(exc)})
         except AttributeError:
@@ -153,16 +174,26 @@ class _Handler(BaseHTTPRequestHandler):
             return self._accept("look", lambda: look(xy, alt))
         if self.path == "/drive":
             drive = self._method("drive")
+            # Резервный канал квадрата огня разбирается ДО проверки соседства:
+            # квадрат должен дойти даже с отклонённой командой переезда.
+            fire, level = body.get("fire"), body.get("fire_level")
             cell = self._method("check_drive")(body["cell"])
-            return self._accept("drive", lambda: drive(cell))
+            return self._accept("drive", lambda: drive(cell, fire, level))
         with self.lock:
             if self.path == "/led":
                 return self.robot.led(body.get("mode", "off"), body.get("color"))
+            if self.path == "/fire":
+                # Синхронно и МИМО _accept: тот отказал бы 409, пока аппарат
+                # занят, а квадрат обязан приниматься на ходу — диспетчер вправе
+                # уточнить его посреди заезда.
+                return self._method("tell_fire")(body)
             if self.path == "/stop":
                 return self.robot.stop()
         return None
 
     def do_POST(self) -> None:  # noqa: N802
+        if self.no_fire and self.path == "/fire":
+            return self._json(404, {"error": "нет такого пути: /fire"})
         try:
             body = self._body()
             # Дедупликация идёт ДО проверок команды, а не после: к моменту повтора
@@ -191,6 +222,8 @@ def serve(
     move_time: float = 1.2,
     quiet: bool = False,
     scene=None,
+    fire_verdict: dict | None = None,
+    no_fire: bool = False,
 ):
     """Поднять мок в отдельном потоке. Возвращает (сервер, робот).
 
@@ -199,12 +232,17 @@ def serve(
 
     scene — нарисованный мир для кадров (city/robots/scene.py). Без него мок отдаёт
     заглушку, и проверить по сети можно только связь, но не зрение.
+
+    fire_verdict — заданный бортовой вердикт про огонь у дрона (см. FakeDrone).
+    no_fire — отвечать 404 на оба /fire: так репетируется аппарат прошлой версии.
     """
     clock = RealClock()
     if role == "rover":
         robot = FakeRover(clock, cell, move_time=move_time)
     else:
-        robot = ROLES[role](clock, cell, name=name or role, scene=scene)
+        robot = ROLES[role](
+            clock, cell, name=name or role, scene=scene, fire_verdict=fire_verdict
+        )
 
     handler = type(
         "_Bound",
@@ -215,6 +253,7 @@ def serve(
             "dedup": {},  # свой на каждый мок: иначе моки делят память команд
             "dedup_lock": threading.Lock(),
             "quiet": quiet,
+            "no_fire": no_fire,
         },
     )
     server = ThreadingHTTPServer(("0.0.0.0", port), handler)
@@ -232,6 +271,18 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--move-time", type=float, default=1.2, help="секунд на переезд в соседнюю клетку")
     p.add_argument("--quiet", action="store_true")
     p.add_argument("--blank", action="store_true", help="отдавать пустой кадр вместо нарисованного поля")
+    p.add_argument(
+        "--fire",
+        default="",
+        help="ЗАДАННЫЙ бортовой вердикт про огонь у дрона, например 4,2x3 "
+        "(клетка x число огоньков) или «нет». Не настроен — GET /fire честно "
+        "отказывает: «не знаю» и «не вижу» это разные ответы",
+    )
+    p.add_argument(
+        "--no-fire",
+        action="store_true",
+        help="отвечать 404 на /fire: репетиция аппарата прошлой версии",
+    )
     args = p.parse_args(argv)
 
     cell = tuple(int(v) for v in args.cell.split(","))
@@ -243,10 +294,16 @@ def main(argv: list[str] | None = None) -> int:
         from .scene import SceneSpec
 
         scene = SceneSpec.from_config(config_mod.load())
-    server, robot = serve(args.role, args.port, cell, args.name, args.move_time, args.quiet, scene)
+    verdict = parse_verdict(args.fire) if args.fire else None
+    server, robot = serve(
+        args.role, args.port, cell, args.name, args.move_time, args.quiet, scene,
+        fire_verdict=verdict, no_fire=args.no_fire,
+    )
     print(
         f"мок «{robot.name}» ({args.role}) слушает порт {args.port}, стоит в клетке {list(robot.cell)}\n"
-        f"проверка: curl http://127.0.0.1:{args.port}/status\n"
+        + (f"вердикт про огонь ЗАДАН: {verdict}\n" if verdict else "")
+        + ("/fire отвечает 404 (--no-fire)\n" if args.no_fire else "")
+        + f"проверка: curl http://127.0.0.1:{args.port}/status\n"
         f"остановить: Ctrl+C",
         flush=True,
     )

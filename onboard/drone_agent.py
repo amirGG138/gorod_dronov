@@ -1640,7 +1640,10 @@ class Handler(BaseHTTPRequestHandler):
             return {}
         try:
             return json.loads(self.rfile.read(length) or b"{}")
-        except json.JSONDecodeError:
+        except ValueError:
+            # ValueError, а не json.JSONDecodeError: тело с битым байтом даёт
+            # UnicodeDecodeError, и на нём поток обработчика падал молча — вместо
+            # ответа диспетчер получал обрыв связи с бортом.
             return {}
 
     def log_message(self, fmt: str, *args) -> None:

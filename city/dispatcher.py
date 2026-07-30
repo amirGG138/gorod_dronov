@@ -72,6 +72,23 @@ class Dispatcher:
         # Мониторы, чья посадка не подтвердилась: попадают в лог разведки, чтобы
         # «сел» на пульте не расходилось с тем, что видно глазами над полем.
         self.unverified: list[str] = []
+        # Бортовые вердикты про огонь: имя монитора -> {verdict|error, obs}. Второй,
+        # независимый от city/vision.py источник — но роскошь, а не звено управления:
+        # каждый его отказ переносится молча, попытка идёт как без него.
+        self.onboard: dict[str, dict[str, Any]] = {}
+        self.ask_onboard = bool(cfg.get("flags.ask_onboard_fire", True))
+        # Двойной предел на опрос бортов. Дело не только в 15-минутной попытке:
+        # бортовой разбор — это OpenCV на OrangePi ОДНОВРЕМЕННО с удержанием метки
+        # под камерой. Начнёт борт от этого терять метку — выключается флагом.
+        self.onboard_budget = float(cfg.get("survey.onboard_budget", 10.0))
+        self.onboard_spent = 0.0
+        self._budget_said = False
+        # Квадрат огня роверу. tell_fire_on выключает обмен целиком, _fire_sent
+        # помнит отправленное (чтобы не повторяться и чтобы заметить, что ровер его
+        # забыл), rover_knows_fire гаснет, если агент ровера про /fire не знает.
+        self.tell_fire_on = bool(cfg.get("flags.tell_rover_fire", True))
+        self._fire_sent: dict[str, Any] | None = None
+        self.rover_knows_fire = True
         # Модель. Создаётся всегда, работает только при flags.use_llm и никогда не
         # находится в цепи управления: её предложения проходят через rules.py.
         self.brain = Brain(cfg)
@@ -90,12 +107,20 @@ class Dispatcher:
                 "use_drones": bool(self.cfg.get("flags.use_drones", False)),
                 "use_vup": bool(self.cfg.get("flags.use_vup", False)),
                 "use_llm": bool(self.cfg.get("flags.use_llm", False)),
+                "ask_onboard_fire": self.ask_onboard,
+                "tell_rover_fire": self.tell_fire_on,
             },
+            layout=self._layout(),
             reason="начало зачётной попытки",
         )
         try:
             self.connect()
             self.survey()
+            # Ровер узнаёт цель сразу после разведки, а не перед первым переездом:
+            # если план дальше сорвётся (RouteBlocked, заряд), в логе всё равно
+            # останется, что квадрат до него дошёл. Клетку подъезда пошлём отдельно —
+            # её считает компиляция плана ниже.
+            self.tell_rover_fire()
             # Сначала спрашиваем модель, потом объясняем план: обоснование обязано
             # называть ту клетку, на которую план и построен, иначе лог решений
             # расходится с делом.
@@ -134,6 +159,14 @@ class Dispatcher:
                 moves=moves,
                 end=list(end),
                 reason=f"скомпилировано {len(actions)} действий на {moves} переездов",
+            )
+            # Теперь известна клетка подъезда — дополняем квадрат ею. Ровер по ней
+            # пока не едет сам, но данные для будущей маршрутизации «башня <-> очаг»
+            # лежат у него, а не только в плане диспетчера. Считается тем же
+            # выражением, что в rules.fire_route: полагаться на «end совпадает с
+            # подъездом» нельзя — это совпадение, а не контракт.
+            self.tell_rover_fire(
+                spot=spot or self.field.approach(self.sc.fire_cell, self.sc.tower)
             )
 
             self.precharge(budget, budget_reason)
@@ -181,6 +214,30 @@ class Dispatcher:
             done["llm_reason"] = summary
         self.log.ev("DONE", **done)
         return 0 if ok else 1
+
+    def _layout(self) -> dict[str, Any]:
+        """Раскладка поля в самом журнале: по нему видно, на каком поле это снято.
+
+        Дашборд (city/viz.py) предпочитает её текущему config.yaml, и это важнее
+        удобства: раскладку на площадке правят каждый день, а вчерашний прогон надо
+        показывать таким, каким он был.
+        """
+        return {
+            "size": [self.field.cols, self.field.rows],
+            "cell": self.field.cell,
+            "buildings": [list(c) for c in sorted(self.field.buildings)],
+            "tower": list(self.sc.tower),
+            "charge": list(self.sc.charge),
+            "rover_start": list(self.sc.rover_start),
+            # Площадки: {id метки: клетка}. В JSON ключи станут строками — так и надо.
+            "pads": {str(mid): list(cell) for mid, cell in sorted(self.pads.items())},
+            # Мониторы попытки: {имя: клетка своей площадки}. Отдельно от pads, потому
+            # что дроны на площадке могут быть не все (ключ --monitors).
+            "monitors": {
+                name: list(as_cell(self.cfg.robots.monitors[name].pad))
+                for name in sorted(self.fleet.monitors)
+            },
+        }
 
     def emergency_stop(self, why: str) -> list[dict[str, Any]]:
         """Остановить всё и записать, кого остановить не удалось.
@@ -466,10 +523,61 @@ class Dispatcher:
             drone.look(point, self.survey_alt)
             self._wait_state(drone, ("hover",), timeout=25.0)
         frame = drone.shot()
+        # Вердикт борта спрашивается ЗДЕСЬ и только здесь. На GET /fire борт снимает
+        # СВЕЖИЙ кадр, значит спрашивать можно, пока он ещё висит над меткой: после
+        # посадки пришёл бы вердикт по полу, а принять такой за «огня нет» опаснее,
+        # чем не спрашивать вовсе. Садится монитор в _scan_drone, в finally.
+        asked = self._ask_onboard(name, drone)
         if home is not None:
             drone.look(home, self.survey_alt)
             self._wait_state(drone, ("hover",), timeout=25.0)
-        seen.append(self._see(name, frame, point))
+        obs = self._see(name, frame, point)
+        seen.append(obs)
+        if asked is not None:
+            # Оба разбора ОДНОГО зависания кладутся рядом: сверять имеет смысл
+            # только их, а не бортовой вердикт с чужим кадром.
+            self.onboard[name] = {**asked, "obs": obs}
+
+    def _ask_onboard(self, name: str, drone) -> dict[str, Any] | None:
+        """Спросить борт, что он видит. None — не спрашивали вовсе.
+
+        Отказ в любой форме (404 у старой прошивки, 503 без кадра, таймаут) — это
+        ОТСУТСТВИЕ ВЕРДИКТА, а не отсутствие огня, и он всё равно возвращается: тогда
+        про молчащий борт напишется FIRE_CHECK, и в логе будет видно, спрашивали или
+        нет. Разведка от этого не зависит ни в одной ветке.
+        """
+        if not self.ask_onboard:
+            return None
+        if self.onboard[name]["ok"] if name in self.onboard else False:
+            # Второй проход разведки снимает кадр с той же площадки (survey.offsets
+            # пуст намеренно), так что спрашивать борт заново незачем: вердикт был бы
+            # тот же, а стоил бы ещё до 4 с из бюджета попытки. После ОТКАЗА
+            # спрашиваем повторно — он мог быть случайным.
+            return None
+        if self.onboard_spent >= self.onboard_budget:
+            if not self._budget_said:
+                self._budget_said = True
+                self.log.ev(
+                    "SURVEY",
+                    source="drones",
+                    stage="onboard-budget",
+                    spent=round(self.onboard_spent, 1),
+                    reason=(
+                        f"бюджет на бортовые вердикты исчерпан "
+                        f"({self.onboard_budget:g} с) — остальные мониторы не "
+                        "спрашиваем, разбор кадров у диспетчера свой"
+                    ),
+                )
+            return None
+        started = self.clock.now()
+        try:
+            verdict = drone.fire()
+        except RobotError as exc:
+            asked: dict[str, Any] = {"ok": False, "error": str(exc)}
+        else:
+            asked = {"ok": True, "verdict": verdict}
+        self.onboard_spent += max(0.0, self.clock.now() - started)
+        return asked
 
     def _see(self, name: str, frame: bytes, point) -> vision.Observation:
         """Разобрать один кадр и записать увиденное в лог — даже если не увидели ничего."""
@@ -544,9 +652,129 @@ class Dispatcher:
             points.append((round(x, 3), round(y, 3)))
         return points
 
+    def _check_onboard(self, scene: vision.Scene) -> dict[str, Any]:
+        """Сверить свой разбор кадров с бортовыми вердиктами. Пишет FIRE_CHECK.
+
+        Сверяется ОДНО И ТО ЖЕ зависание в двух разборах: диспетчер разбирает JPEG,
+        снятый с /shot, борт — свой кадр, снятый мгновением позже. Ни один из них не
+        «правильнее» по определению, но при расхождении побеждает диспетчер: у него
+        голосование по нескольким кадрам, у борта один кадр.
+
+        Расхождение здесь — не баг, а симптом разъехавшейся калибровки: у борта своя
+        таблица меток площадок, у диспетчера aruco.pads из config.yaml, а
+        vision.marker_edge_deg вообще гипотеза. В первый день на площадке это
+        единственный дешёвый способ поймать зеркало по оси или чужой размер маркера.
+
+        Возвращает то, чем борт может ЗАКРЫТЬ ДЫРКУ (клетку, если зрение не нашло
+        ничего; число огоньков, если клетка есть, а счёт не вышел). Переопределять
+        найденное борт не вправе.
+        """
+        by_cell: dict[Cell, int] = {}
+        counts: dict[Cell, list[int]] = {}
+        for name, entry in self.onboard.items():
+            obs = entry.get("obs")
+            found = bool(obs is not None and obs.found)
+            my_cell = as_cell(obs.fire_cell) if found and obs.fire_cell else None
+            my_count = obs.fire_count if found else None
+
+            verdict = entry.get("verdict") or {}
+            error = entry.get("error", "")
+            dry = bool(verdict.get("dry"))
+            on_cell = (
+                as_cell(verdict["cell"])
+                if verdict.get("found") and verdict.get("cell")
+                else None
+            )
+            on_count = verdict.get("count") if verdict.get("found") else None
+
+            if error:
+                agree, why = None, f"борт не ответил про огонь: {error}"
+            elif dry:
+                # Заглушку нельзя выдавать за второй источник — то же правило, по
+                # которому mock-модель принципиально не смотрит на кадры.
+                agree, why = None, "на том конце заглушка (--dry) — второго источника в этом прогоне нет"
+            elif on_cell is not None and my_cell is not None:
+                agree = on_cell == my_cell
+                why = (
+                    f"два независимых разбора одного зависания дали клетку {list(on_cell)}"
+                    f" (привязка борта «{verdict.get('anchor')}»"
+                    + (f", метка {verdict['marker_id']}" if verdict.get("marker_id") else "")
+                    + ")"
+                    if agree
+                    else (
+                        f"РАСХОЖДЕНИЕ: борт видит очаг в {list(on_cell)}, диспетчер по "
+                        f"тому же зависанию — в {list(my_cell)}. Побеждает диспетчер "
+                        "(у него голосование по кадрам). Проверьте калибровку: размер "
+                        "маркера, номера площадок, vision.marker_edge_deg; смотрите "
+                        "размеченный кадр *-mark.jpg"
+                    )
+                )
+            elif on_cell is not None:
+                agree = None
+                why = (
+                    f"борт назвал очаг в {list(on_cell)}, а диспетчер на этом кадре "
+                    "ничего не нашёл — вердикт борта пойдёт закрывать дырку, если "
+                    "очага не найдётся и на остальных кадрах"
+                )
+            elif my_cell is not None:
+                agree = False
+                why = (
+                    f"диспетчер видит очаг в {list(my_cell)}, а борт на своём кадре "
+                    "очага не назвал — это расхождение разборов, а не разных углов"
+                )
+            else:
+                agree, why = None, "ни борт, ни диспетчер очага на этом кадре не нашли"
+
+            self.log.ev(
+                "FIRE_CHECK",
+                drone=name,
+                onboard_cell=list(on_cell) if on_cell else None,
+                onboard_count=on_count,
+                onboard_count_source=verdict.get("count_source"),
+                onboard_anchor=verdict.get("anchor"),
+                onboard_marker=verdict.get("marker_id"),
+                onboard=("dry" if dry else ("mock" if verdict.get("source") == "mock" else "")),
+                my_cell=list(my_cell) if my_cell else None,
+                my_count=my_count,
+                scene_cell=list(scene.fire_cell) if scene.found else None,
+                agree=agree,
+                delta_cells=(
+                    abs(on_cell[0] - my_cell[0]) + abs(on_cell[1] - my_cell[1])
+                    if on_cell is not None and my_cell is not None
+                    else None
+                ),
+                error=error or None,
+                reason=why,
+            )
+            # В голосование идут только настоящие вердикты: заглушка и отказ не в счёт.
+            if on_cell is not None and not dry and not error:
+                by_cell[on_cell] = by_cell.get(on_cell, 0) + 1
+                if on_count and not verdict.get("clipped"):
+                    # Кучка, упёршаяся в край кадра, занижает число жетонов — по
+                    # такому вердикту степень пожара считать нельзя.
+                    counts.setdefault(on_cell, []).append(int(on_count))
+
+        fill: dict[str, Any] = {}
+        if not scene.found and by_cell:
+            fill["cell"] = max(by_cell.items(), key=lambda kv: (kv[1], kv[0]))[0]
+        target = scene.fire_cell if scene.found else fill.get("cell")
+        if scene.level is None and target is not None and counts.get(as_cell(target)):
+            # Самое частое, при равенстве большее: недовезти воду хуже, чем привезти
+            # лишний раз (та же логика, что в vision.merge).
+            seen_counts = counts[as_cell(target)]
+            fill["level"] = min(
+                max(seen_counts, key=lambda c: (seen_counts.count(c), c)),
+                self.max_fire_count,
+            )
+        return fill
+
     def _apply_scene(self, scene: vision.Scene, shots: int) -> None:
         """Итог разведки. Не нашли — так и пишем, а не подставляем тихо конфиг."""
-        if not scene.found:
+        # Сверка с бортами идёт ДО записи итога: борт вправе закрыть дырку, а лог
+        # обязан назвать ту самую клетку, на которой потом построится план. Иначе
+        # FIRE_SPOTTED скажет одно, а ровер поедет к другому.
+        fill = self._check_onboard(scene) if self.onboard else {}
+        if not scene.found and not fill.get("cell"):
             self.log.ev(
                 "SURVEY",
                 source="config",
@@ -555,8 +783,9 @@ class Dispatcher:
                 fire_level=self.sc.fire_level,
                 landing_unverified=self.unverified,
                 reason=(
-                    f"кадров снято {shots}, очаг ни на одном не распознан — "
-                    f"работаем по клетке из config.yaml {list(self.sc.fire_cell)}. "
+                    f"кадров снято {shots}, очаг ни на одном не распознан"
+                    + (", бортовые вердикты тоже пусты" if self.onboard else "")
+                    + f" — работаем по клетке из config.yaml {list(self.sc.fire_cell)}. "
                     "Проверьте пороги цвета: python3 -m city.vision <кадр> --debug"
                     + (
                         f"; посадку не подтвердили: {', '.join(self.unverified)}"
@@ -568,9 +797,16 @@ class Dispatcher:
             return
 
         was, was_level = self.sc.fire_cell, self.sc.fire_level
-        self.sc.fire_cell = scene.fire_cell
+        if scene.found:
+            cell, cell_source = scene.fire_cell, "frames"
+        else:
+            # Зрение диспетчера не нашло ничего, а борт назвал клетку: он закрывает
+            # дырку, а не спорит с работающим зрением. Строго лучше прежнего
+            # поведения, когда в этом случае тихо брался config.yaml.
+            cell, cell_source = as_cell(fill["cell"]), "onboard"
+        self.sc.fire_cell = cell
         # Человек по заданию — в окне ГОРЯЩЕГО здания, поэтому ВУП летит туда же.
-        self.sc.person_cell = scene.fire_cell
+        self.sc.person_cell = cell
         # Степень пожара = сколько огоньков лежит рядом, и это видно на кадре.
         # Посчитанное побеждает записанное в настройках — как и клетка выше.
         if scene.level is not None:
@@ -581,6 +817,14 @@ class Dispatcher:
                 + (f" (по кадрам: {scene.level_votes})" if len(scene.level_votes) > 1 else "")
                 + (f"; {scene.count_note}" if scene.count_note else "")
             )
+        elif fill.get("level"):
+            self.sc.fire_level = int(fill["level"])
+            level_source = "onboard"
+            how = (
+                f"диспетчер огоньки не сосчитал"
+                + (f" ({scene.count_note})" if scene.count_note else "")
+                + f", счёт взят с борта: {self.sc.fire_level}"
+            )
         else:
             level_source = "config"
             how = (
@@ -590,39 +834,48 @@ class Dispatcher:
             )
         self.log.ev(
             "FIRE_SPOTTED",
-            cell=list(scene.fire_cell),
+            cell=list(cell),
             votes=scene.votes,
             total=scene.total,
             by_cell=scene.by_cell,
             drones=scene.drones,
             level=self.sc.fire_level,
             level_source=level_source,
+            cell_source=cell_source,
             fire_count=scene.level,
             level_votes=scene.level_votes,
             was_level=was_level,
             reason=(
-                f"очаг найден по кадрам: {scene.votes} из {scene.total} за клетку "
-                f"{list(scene.fire_cell)} (дроны: {', '.join(scene.drones)}). " + how
+                (
+                    f"очаг найден по кадрам: {scene.votes} из {scene.total} за клетку "
+                    f"{list(cell)} (дроны: {', '.join(scene.drones)}). "
+                    if cell_source == "frames"
+                    else f"очаг на кадрах диспетчера не распознан, клетку {list(cell)} "
+                    "назвал борт своим разбором. "
+                )
+                + how
             ),
         )
         self.log.ev(
             "SURVEY",
             source="drones",
             shots=shots,
-            fire=list(scene.fire_cell),
+            fire=list(cell),
             fire_level=self.sc.fire_level,
             landing_unverified=self.unverified,
             level_source=level_source,
+            cell_source=cell_source,
             reason=(
                 f"сцена построена по кадрам мониторов"
+                + ("" if cell_source == "frames" else " и бортовому вердикту")
                 + (
                     f"; в config.yaml стояла клетка {list(was)}, побеждает найденная"
-                    if as_cell(was) != scene.fire_cell
+                    if as_cell(was) != cell
                     else "; совпало с config.yaml"
                 )
                 + (
-                    f"; уровень в config.yaml был {was_level}, по кадрам {self.sc.fire_level}"
-                    if level_source == "frames" and was_level != self.sc.fire_level
+                    f"; уровень в config.yaml был {was_level}, стал {self.sc.fire_level}"
+                    if level_source != "config" and was_level != self.sc.fire_level
                     else ""
                 )
                 + (
@@ -631,6 +884,109 @@ class Dispatcher:
                     else ""
                 )
             ),
+        )
+
+    # --- квадрат огня роверу -------------------------------------------------
+
+    def _fire_payload(self, spot: Cell | None = None) -> dict[str, Any]:
+        """Что ровер должен знать про пожар. Клетки, а не метры: метры у него свои."""
+        payload: dict[str, Any] = {
+            "cell": list(self.sc.fire_cell),
+            "level": self.sc.fire_level,
+            "tower": list(self.sc.tower),
+            "charge": list(self.sc.charge),
+            "at": round(self.clock.now(), 1),
+        }
+        if spot is not None:
+            # Клетка подъезда: в саму горящую клетку ровер по регламенту не въезжает.
+            payload["approach"] = list(as_cell(spot))
+        return payload
+
+    def tell_rover_fire(self, spot: Cell | None = None, clear: bool = False,
+                        again: bool = False) -> None:
+        """Сказать роверу, где горит. Информирование, а не команда движения.
+
+        Отказ здесь НИКОГДА не срывает попытку: квадрат — это знание, а тушение
+        держится на плане диспетчера. Агент ровера запускают руками с ноутбука, и на
+        площадке он легко окажется версии, ничего про /fire не знающей: она ответит
+        404, и тогда квадрат доедет резервным каналом — полями в теле /drive
+        (см. _do_drive). Долбить отказавший путь незачем, поэтому rover_knows_fire
+        гасится после первого 404.
+        """
+        rover = getattr(self.fleet, "rover", None)
+        if not self.tell_fire_on or rover is None or not self.rover_knows_fire:
+            return
+        payload = {"clear": True} if clear else self._fire_payload(spot)
+        if not clear and not again and self._same_fire(payload):
+            return  # то же самое уже отправлено — молчим, а не повторяем
+        try:
+            rover.tell_fire(payload)
+        except RobotError as exc:
+            self.rover_knows_fire = False
+            self.log.ev(
+                "FIRE_TARGET",
+                clear=clear,
+                cell=payload.get("cell"),
+                level=payload.get("level"),
+                ok=False,
+                error=str(exc),
+                reason=(
+                    f"квадрат огня роверу не доставлен основным каналом: {exc}. "
+                    "Дальше он поедет полями fire/fire_level в теле /drive — их "
+                    "агент любой версии проглатывает молча"
+                ),
+            )
+            return
+        self._fire_sent = None if clear else payload
+        self.log.ev(
+            "FIRE_TARGET",
+            clear=clear,
+            cell=payload.get("cell"),
+            level=payload.get("level"),
+            approach=payload.get("approach"),
+            tower=payload.get("tower"),
+            ok=True,
+            via="fire",
+            again=again or None,
+            reason=(
+                "пожар потушен — снимаем квадрат, чтобы статус ровера не утверждал "
+                "обратное"
+                if clear
+                else (
+                    ("повторная отправка: " if again else "")
+                    + f"ровер знает, что горит в клетке {payload['cell']}, "
+                    f"поездок за водой {payload['level']}, башня {payload['tower']}"
+                    + (
+                        f", подъезд {payload['approach']}"
+                        if payload.get("approach")
+                        else " (клетку подъезда посчитаем при компиляции плана)"
+                    )
+                )
+            ),
+        )
+
+    def _same_fire(self, payload: dict[str, Any]) -> bool:
+        """Тот же квадрат, что уже отправлен? Время в сравнение не входит."""
+        if self._fire_sent is None:
+            return False
+        skip = ("at",)
+        now = {k: v for k, v in payload.items() if k not in skip}
+        was = {k: v for k, v in self._fire_sent.items() if k not in skip}
+        return now == was
+
+    def _heal_fire(self, st: dict[str, Any]) -> None:
+        """Ровер забыл квадрат — отправить снова.
+
+        Самый вероятный сбой площадки: агент ровера живёт на ноутбуке, и его
+        перезапускают руками — после этого он не помнит ничего. Диспетчер и так
+        опрашивает статус перед каждым переездом, так что проверка бесплатна. Без
+        неё ровер молча забыл бы цель, и заметили бы только при разборе логов.
+        """
+        if self._fire_sent is None or st.get("fire"):
+            return
+        self.tell_rover_fire(
+            spot=as_cell(self._fire_sent["approach"]) if self._fire_sent.get("approach") else None,
+            again=True,
         )
 
     def _park(self, drone, name: str) -> str:
@@ -763,13 +1119,23 @@ class Dispatcher:
     def _do_drive(self, action) -> None:
         rover = self.fleet.rover
         for i, nxt in enumerate(action.path[1:]):
-            prev = as_cell(rover.status()["cell"])
+            st = rover.status()
+            prev = as_cell(st["cell"])
+            self._heal_fire(st)
             if not self.energy.can_move():
                 raise EnergyError(
                     f"игровой заряд кончился на пути в {list(action.cell)}, "
                     "движение ровера заблокировано"
                 )
-            rover.drive(nxt)
+            # Квадрат огня едет резервным каналом с каждой командой переезда: агент
+            # любой версии лишние поля тела молча игнорирует, поэтому отказать этот
+            # путь не может. Основной канал — POST /fire, см. tell_rover_fire.
+            # Флаг tell_rover_fire гасит ОБА канала: выключают его тогда, когда на
+            # площадке ровер, которому про пожар знать не надо вовсе.
+            if self.tell_fire_on:
+                rover.drive(nxt, fire=self.sc.fire_cell, fire_level=self.sc.fire_level)
+            else:
+                rover.drive(nxt)
             self._wait_cell(rover, as_cell(nxt), timeout=DRIVE_TIMEOUT)
             self.energy.spend_move()
             fields = {
@@ -811,6 +1177,9 @@ class Dispatcher:
     def _do_note(self, action) -> None:
         if action.event == "FIRE_EXTINGUISHED":
             self.fire_done = True
+            # Снимаем квадрат: иначе /status ровера до конца попытки утверждает, что
+            # пожар ещё горит, — а по нему судят и дашборд, и будущая маршрутизация.
+            self.tell_rover_fire(clear=True)
         self.log.ev(
             action.event,
             action=action.id,

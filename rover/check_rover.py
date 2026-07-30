@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Проверка агента ровера (этап 4) — простым списком запросов, без симуляций.
 
-Скрипт стучится в HTTP-контракт onboard/rover_agent.py и печатает по строке на
+Скрипт стучится в HTTP-контракт rover/rover_agent.py и печатает по строке на
 каждую проверку: что спросили, что ждали, что пришло. Никакой логики миссии тут
 нет — только «отвечает ли агент так, как обещано в PLAN.md, этап 4».
 
@@ -10,19 +10,23 @@
 1. Сам себе стенд (по умолчанию) — скрипт запускает rover_agent.py --dry на
    свободном порту, гоняет ВСЕ проверки, включая переезд, и глушит агента:
 
-       python3 rover_tools/check_rover.py
+       python3 rover/check_rover.py
 
 2. По уже запущенному агенту — например по тому, что смотрит на живой ровер.
    Движение при этом НЕ выполняется (ровер поедет по-настоящему), пока не
    попросишь явно ключом --move:
 
-       python3 rover_tools/check_rover.py --url http://127.0.0.1:8010
-       python3 rover_tools/check_rover.py --url http://127.0.0.1:8010 --move
+       python3 rover/check_rover.py --url http://127.0.0.1:8010
+       python3 rover/check_rover.py --url http://127.0.0.1:8010 --move
 
 3. Плюс железо мимо агента — два GET прямо в родные API ровера, чтобы отделить
    «агент виноват» от «ровер молчит»:
 
-       python3 rover_tools/check_rover.py --url http://127.0.0.1:8010 --rover-ip 192.168.1.125
+       python3 rover/check_rover.py --url http://127.0.0.1:8010 --rover-ip 192.168.1.125
+
+Раздел «Квадрат огня» работает и без Nav2: это знание, а не движение. Значит в
+первый день на площадке цепочку «дрон -> диспетчер -> ровер» можно закрыть раньше,
+чем поднимут навигацию.
 
 Код возврата: 0 — все проверки прошли, 1 — есть провалы. Нужна только стандартная
 библиотека.
@@ -41,7 +45,7 @@ import urllib.request
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-AGENT = pathlib.Path(__file__).resolve().parent.parent / "onboard" / "rover_agent.py"
+AGENT = pathlib.Path(__file__).resolve().parent / "rover_agent.py"
 
 results = []  # (имя, прошла ли, что пришло)
 
@@ -155,7 +159,57 @@ def check_contract(url, move):
             st = wait_idle(url)
             check(f"вернулся в {cell}", st.get("cell") == cell, f"cell={st.get('cell')}")
 
-    # 6. Стоп — последняя проверка, чтобы оставить ровер заведомо стоящим.
+    # 6. Квадрат огня: где горит. Это ЗНАНИЕ, а не команда движения, поэтому
+    #    проверяется даже при лежащем Nav2 — то есть эту часть цепочки «дрон ->
+    #    диспетчер -> ровер» первый день на площадке закрывает раньше, чем поднимут
+    #    навигацию. Ключевое здесь — второй, резервный канал доставки: те же поля в
+    #    теле /drive. Он и есть страховка от агента прошлой версии.
+    print("\n── Квадрат огня ────────────────────────────────────────────")
+    _, st = req("GET", url + "/status")
+    cell = st["cell"]
+    code, ans = req("POST", url + "/fire",
+                    {"cell": [4, 2], "level": 3, "tower": [1, 3], "approach": [4, 3],
+                     "source": "проверка", "at": 1.0})
+    got = (ans.get("fire") or {})
+    check("POST /fire принят", code == 200 and got.get("cell") == [4, 2],
+          f"код {code}, {ans.get('error') or got}")
+    check("уровень и ориентиры сохранены",
+          got.get("level") == 3 and got.get("tower") == [1, 3] and got.get("approach") == [4, 3],
+          f"{got}")
+    code, ans = req("GET", url + "/fire")
+    check("GET /fire отдаёт квадрат обратно",
+          code == 200 and ans.get("known") and (ans.get("fire") or {}).get("cell") == [4, 2],
+          f"код {code}, {ans}")
+    _, st = req("GET", url + "/status")
+    check("квадрат виден в /status", (st.get("fire") or {}).get("cell") == [4, 2],
+          f"fire={st.get('fire')}")
+    check("время диспетчера лежит отдельно от своего",
+          (st.get("fire") or {}).get("at_dispatcher") == 1.0
+          and "since" in (st.get("fire") or {}),
+          f"fire={st.get('fire')}")
+    code, ans = req("POST", url + "/fire", {"level": 2})
+    check("POST /fire без cell → 400", code == 400, f"код {code}")
+    code, ans = req("POST", url + "/fire", {"cell": [99, 99]})
+    check("POST /fire за полем → 403", code == 403, ans.get("error", f"код {code}"))
+    code, ans = req("POST", url + "/fire", {"cell": [2, 2], "command_id": "check-fire"})
+    code, ans = req("POST", url + "/fire", {"cell": [2, 2], "command_id": "check-fire"})
+    check("повтор /fire с тем же command_id не исполняется",
+          ans.get("deduplicated") is True, f"ответ: {ans}")
+    # Резервный канал: квадрат в теле команды переезда. Переезд может быть отклонён
+    # (несоседняя клетка) — квадрат обязан дойти всё равно.
+    far = [cell[0] + 2, cell[1]]
+    code, _ = req("POST", url + "/drive", {"cell": far, "fire": [1, 3], "fire_level": 1})
+    _, st = req("GET", url + "/status")
+    check("квадрат доехал резервным каналом в теле /drive",
+          (st.get("fire") or {}).get("cell") == [1, 3]
+          and (st.get("fire") or {}).get("via") == "drive",
+          f"код переезда {code} (403 — так и надо), fire={st.get('fire')}")
+    code, ans = req("POST", url + "/fire", {"clear": True})
+    _, st = req("GET", url + "/status")
+    check("POST /fire clear забывает квадрат",
+          code == 200 and "fire" not in st, f"код {code}, fire={st.get('fire')}")
+
+    # 7. Стоп — последняя проверка, чтобы оставить ровер заведомо стоящим.
     print("\n── Аварийная остановка ─────────────────────────────────────")
     code, _ = req("POST", url + "/stop")
     st = wait_idle(url, 10)

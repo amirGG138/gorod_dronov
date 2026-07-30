@@ -18,7 +18,9 @@ DECISIONS = {
     "PLAN_CHOSEN",
     "SURVEY",
     "SCAN",
+    "FIRE_CHECK",
     "FIRE_SPOTTED",
+    "FIRE_TARGET",
     "CHARGED",
     "DWELL",
     "FIRE_CYCLE",
@@ -130,7 +132,7 @@ class TestSurveyByPictures(unittest.TestCase):
         code, events = run_and_read(["--sim", "--drones"])
         self.assertEqual(code, 0)
         spotted = next(e for e in events if e["type"] == "FIRE_SPOTTED")
-        self.assertEqual(spotted["cell"], [4, 2])
+        self.assertEqual(spotted["cell"], [3, 4])
         self.assertGreaterEqual(spotted["votes"], 1)
         # И клетка, и уровень измерены по кадрам: источник назван честно.
         self.assertEqual(spotted["level_source"], "frames")
@@ -229,7 +231,7 @@ class TestLlm(unittest.TestCase):
             use="plan",
             model="mock",
             ok=True,
-            data={"approach": [4, 2], "charge_budget": 14, "reason": "поеду в огонь"},
+            data={"approach": [3, 4], "charge_budget": 14, "reason": "поеду в огонь"},
             text="поеду в огонь",
         )
         with mock.patch.object(brain_mod.Brain, "advise_plan", return_value=bad):
@@ -266,6 +268,117 @@ class TestEnergyBlock(unittest.TestCase):
         self.assertIn("заряд", blocks[0]["reason"])
         done = next(e for e in events if e["type"] == "DONE")
         self.assertEqual(done["missions"], [])
+
+
+class TestFireTargetInAFullRun(unittest.TestCase):
+    """Квадрат огня и лента обмена в целом прогоне, а не по частям."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.code, cls.events = run_and_read(["--sim"])
+
+    def of(self, kind):
+        return [e for e in self.events if e["type"] == kind]
+
+    def test_the_rover_is_told_where_it_burns(self):
+        targets = self.of("FIRE_TARGET")
+        self.assertTrue(targets)
+        first = targets[0]
+        self.assertTrue(first["ok"])
+        self.assertEqual(first["cell"], list(self.of("SURVEY")[-1]["fire"]))
+        self.assertEqual(first["via"], "fire")
+
+    def test_the_approach_cell_follows_the_plan(self):
+        """Второй квадрат уходит уже с клеткой подъезда — её считает компиляция плана."""
+        withapproach = [t for t in self.of("FIRE_TARGET") if t.get("approach")]
+        self.assertTrue(withapproach)
+        self.assertNotEqual(withapproach[-1]["approach"], withapproach[-1]["cell"])
+
+    def test_the_square_is_removed_once_the_fire_is_out(self):
+        types = [e["type"] for e in self.events]
+        cleared = [t for t in self.of("FIRE_TARGET") if t.get("clear")]
+        self.assertTrue(cleared, "после тушения квадрат обязан сниматься")
+        self.assertLess(types.index("FIRE_EXTINGUISHED"), len(types))
+
+    def test_every_drive_carries_the_square_as_a_backup(self):
+        drives = [e for e in self.of("MSG") if e["verb"] == "drive"]
+        self.assertTrue(drives)
+        for msg in drives:
+            self.assertIn("fire", msg["args"], "резервный канал обязан ехать с каждым переездом")
+
+    def test_status_polls_never_reach_the_log(self):
+        """Иначе журнал утонет в опросах, а он материал техзащиты."""
+        self.assertEqual([m for m in self.of("MSG") if m["verb"] == "status"], [])
+
+    def test_the_exchange_is_logged_at_all(self):
+        verbs = {m["verb"] for m in self.of("MSG")}
+        self.assertIn("drive", verbs)
+        self.assertIn("led", verbs)
+        self.assertIn("tell_fire", verbs)
+
+    def test_the_square_is_not_repeated_on_every_hop(self):
+        """tell_fire столько же, сколько решений FIRE_TARGET: ни одного лишнего."""
+        told = [m for m in self.of("MSG") if m["verb"] == "tell_fire"]
+        self.assertEqual(len(told), len(self.of("FIRE_TARGET")))
+
+    def test_the_layout_is_in_the_log(self):
+        """Журнал самодостаточен: по нему видно, на каком поле это снято."""
+        layout = self.of("RUN_START")[0]["layout"]
+        self.assertEqual(layout["size"], [6, 6])
+        self.assertTrue(layout["buildings"])
+        self.assertIn("tower", layout)
+        self.assertIn("charge", layout)
+
+
+class TestOnboardVerdictInAFullRun(unittest.TestCase):
+    """Заданный бортовой вердикт: согласие, расхождение и отказ борта.
+
+    Своё зрение диспетчера здесь ничего не находит без OpenCV, поэтому проверяется
+    ветка «борт закрывает дырку». Ветки согласия и расхождения при работающем зрении
+    разобраны в tests/test_fire_check.py.
+    """
+
+    def test_the_board_fills_the_gap_when_vision_is_blind(self):
+        code, events = run_and_read(["--sim", "--drones", "--sim-onboard-fire", "4,2x3"])
+        spotted = [e for e in events if e["type"] == "FIRE_SPOTTED"]
+        self.assertTrue(spotted)
+        self.assertEqual(spotted[0]["cell"], [4, 2])
+        self.assertEqual(spotted[0]["cell_source"], "onboard")
+        self.assertEqual(spotted[0]["level"], 3)
+        self.assertEqual(spotted[0]["level_source"], "onboard")
+        self.assertEqual(code, 0)
+
+    def test_the_board_is_asked_once_per_monitor(self):
+        code, events = run_and_read(["--sim", "--drones", "--sim-onboard-fire", "4,2x1"])
+        asked = [e for e in events if e["type"] == "MSG" and e["verb"] == "fire"]
+        checks = [e for e in events if e["type"] == "FIRE_CHECK"]
+        self.assertTrue(asked)
+        self.assertEqual(len(asked), len(checks))
+
+    def test_a_silent_board_still_gets_a_record(self):
+        """Без --sim-onboard-fire борт отказывает: по логу видно, что спрашивали."""
+        code, events = run_and_read(["--sim", "--drones"])
+        checks = [e for e in events if e["type"] == "FIRE_CHECK"]
+        self.assertTrue(checks)
+        for check in checks:
+            self.assertIsNone(check["agree"])
+            self.assertIn("не ответил", check["reason"])
+        self.assertEqual(code, 0)
+
+    def test_the_flag_switches_the_question_off_entirely(self):
+        code, events = run_and_read(["--sim", "--drones", "--no-onboard-fire"])
+        self.assertEqual([e for e in events if e["type"] == "FIRE_CHECK"], [])
+        self.assertEqual([e for e in events if e["type"] == "MSG" and e["verb"] == "fire"], [])
+        self.assertEqual(code, 0)
+
+    def test_the_flag_switches_the_square_off_entirely(self):
+        code, events = run_and_read(["--sim", "--no-tell-rover-fire"])
+        self.assertEqual([e for e in events if e["type"] == "FIRE_TARGET"], [])
+        told = [e for e in events if e["type"] == "MSG" and e["verb"] == "tell_fire"]
+        self.assertEqual(told, [])
+        drives = [e for e in events if e["type"] == "MSG" and e["verb"] == "drive"]
+        self.assertTrue(all("fire" not in d["args"] for d in drives))
+        self.assertEqual(code, 0)
 
 
 if __name__ == "__main__":

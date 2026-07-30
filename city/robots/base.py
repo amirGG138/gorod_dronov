@@ -7,6 +7,12 @@
     POST /goto    -> goto(cell, alt)   GET  /shot  -> shot()
     POST /look    -> look(xy, alt)     POST /drive -> drive(cell)
     POST /led     -> led(mode, color)  POST /stop  -> stop()
+    GET  /fire    -> fire()            POST /fire  -> tell_fire(payload)
+
+Два /fire — это разные ручки разных аппаратов, и путать их нельзя. GET /fire у
+ДРОНА — вопрос «что ты видишь»: борт сам разбирает свой кадр и отдаёт вердикт
+(второй источник рядом с city/vision.py). POST /fire у РОВЕРА — сообщение «вот
+где горит»: он это запоминает и отдаёт в статусе, но никуда по нему не едет.
 
 /look отличается от /goto только единицами: точка задаётся в метрах поля, а не в
 клетках. Она нужна для облёта: точки обзора монитора лежат МЕЖДУ клетками, и
@@ -53,8 +59,17 @@ class Drone(Robot, Protocol):
 
     def shot(self) -> bytes: ...
 
+    def fire(self) -> dict[str, Any]: ...
+
 
 class Rover(Robot, Protocol):
-    def drive(self, cell: Sequence[int]) -> dict[str, Any]: ...
+    def drive(
+        self,
+        cell: Sequence[int],
+        fire: Sequence[int] | None = None,
+        fire_level: int | None = None,
+    ) -> dict[str, Any]: ...
 
     def led(self, mode: str, color: str | None = None) -> dict[str, Any]: ...
+
+    def tell_fire(self, payload: dict[str, Any]) -> dict[str, Any]: ...

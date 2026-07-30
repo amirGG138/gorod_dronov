@@ -40,6 +40,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-drones", dest="drones", action="store_false")
     p.add_argument("--vup", dest="vup", action="store_true", default=None)
     p.add_argument("--no-vup", dest="vup", action="store_false")
+    # Бортовой вердикт про огонь — роскошь, а не звено управления: он сверяется со
+    # своим разбором кадра и умеет только закрыть дырку. Выключается, если на
+    # площадке борт от лишнего OpenCV начнёт терять метку под камерой.
+    p.add_argument("--onboard-fire", dest="onboard_fire", action="store_true", default=None,
+                   help="спрашивать у бортов их собственный вердикт про огонь (по умолчанию да)")
+    p.add_argument("--no-onboard-fire", dest="onboard_fire", action="store_false",
+                   help="не спрашивать борта: разбор кадров только у диспетчера")
+    p.add_argument("--tell-rover-fire", dest="tell_rover_fire", action="store_true", default=None,
+                   help="сообщать роверу квадрат огня (по умолчанию да)")
+    p.add_argument("--no-tell-rover-fire", dest="tell_rover_fire", action="store_false",
+                   help="не сообщать роверу квадрат огня")
     p.add_argument("--llm", dest="llm", action="store_true", default=None)
     p.add_argument("--no-llm", dest="llm", action="store_false")
     p.add_argument(
@@ -71,13 +82,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="сколько огоньков положить в НАРИСОВАННОМ мире (только с --sim --drones): "
         "проверка, что уровень пожара тоже считается по кадрам, а не берётся из config.yaml",
     )
+    p.add_argument(
+        "--sim-onboard-fire",
+        help="ЗАДАННЫЙ бортовой вердикт про огонь у понарошечных дронов, например "
+        "4,2x3 или «нет» (только с --sim --drones). Вердикт задаётся, а не считается: "
+        "посчитанный тем же city/vision.py был бы фальшивым вторым источником. Так "
+        "проверяются обе ветки сверки — согласие и расхождение",
+    )
     p.add_argument("--logs", default="logs", help="каталог для лога попытки")
     p.add_argument("--quiet", action="store_true", help="не печатать таймлайн в консоль")
     return p
 
 
 def apply_args(cfg, args) -> None:
-    for flag, key in (("drones", "flags.use_drones"), ("vup", "flags.use_vup"), ("llm", "flags.use_llm")):
+    for flag, key in (
+        ("drones", "flags.use_drones"),
+        ("vup", "flags.use_vup"),
+        ("llm", "flags.use_llm"),
+        ("onboard_fire", "flags.ask_onboard_fire"),
+        ("tell_rover_fire", "flags.tell_rover_fire"),
+    ):
         value = getattr(args, flag)
         if value is not None:
             cfg.override(key, value)
@@ -106,6 +130,8 @@ def apply_args(cfg, args) -> None:
         cfg.override("sim.fire_cell", args.sim_fire_cell)
     if args.sim_fire_count is not None:
         cfg.override("sim.fire_count", args.sim_fire_count)
+    if args.sim_onboard_fire:
+        cfg.override("sim.onboard_fire", args.sim_onboard_fire)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -119,7 +145,9 @@ def main(argv: list[str] | None = None) -> int:
     log = Log(clock, run_dir=args.logs, echo=not args.quiet)
     try:
         field = Field.from_config(cfg)
-        fleet = build_fleet(cfg, clock)
+        # log в build_fleet включает обвязку сообщений: каждая команда аппарату
+        # оставит событие MSG, и обмен станет видно в журнале и на дашборде.
+        fleet = build_fleet(cfg, clock, log=log)
         code = Dispatcher(cfg, field, log, clock, fleet).run()
     finally:
         log.close()
