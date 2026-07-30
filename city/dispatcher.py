@@ -12,6 +12,8 @@ from __future__ import annotations
 import math
 import os
 import sys
+import threading
+import time
 from typing import Any, Sequence
 
 from . import vision
@@ -43,6 +45,10 @@ VUP_ALT = 0.7  # рабочая высота ВУП, м
 ON_GROUND = ("landed", "landed_unverified", "idle")
 MOVE_TOLERANCE = 0.25  # допуск на дрожание сети при проверке «не двигался», с
 CONNECT_WAIT = 10.0  # сколько ждать ответа борта при старте, с (ROS поднимается небыстро)
+# Сколько ждать одновременную разведку всех мониторов, с. Внутри у каждого свои
+# сроки (взлёт 20 с, посадка 25 с) — этот срок общий и нужен на случай, когда борт
+# завис, не ответив ни отказом, ни успехом: попытка идёт дальше без него.
+SCAN_TIMEOUT = 90.0
 DRIVE_TIMEOUT = 30.0  # сколько ждать переезда ровера в соседнюю клетку, с
 
 
@@ -69,9 +75,18 @@ class Dispatcher:
         self.vision_settings = vision.settings(cfg)
         self.max_fire_count = vision.max_count(cfg)
         self.survey_alt = float(cfg.get("survey.alt", MONITOR_ALT))
+        # Взлетать всем мониторам разом или по очереди (этап 8). По очереди —
+        # страховка на первый прогон на площадке, ключ --survey-serial.
+        self.survey_serial = bool(cfg.get("survey.serial", False))
         # Мониторы, чья посадка не подтвердилась: попадают в лог разведки, чтобы
         # «сел» на пульте не расходилось с тем, что видно глазами над полем.
         self.unverified: list[str] = []
+        # Мониторы, не ответившие на перекличке: их не зовут в разведку вовсе.
+        self.offline: list[str] = []
+        # Кто сорвал разведку и почему: причина попадает в отчёт о покрытии поля.
+        self.problems: dict[str, str] = {}
+        # Итог покрытия: какие четверти поля никто не снял (заполняется разведкой).
+        self.coverage: dict[str, Any] = {}
         # Бортовые вердикты про огонь: имя монитора -> {verdict|error, obs}. Второй,
         # независимый от city/vision.py источник — но роскошь, а не звено управления:
         # каждый его отказ переносится молча, попытка идёт как без него.
@@ -396,6 +411,15 @@ class Dispatcher:
                 reason = f"борт на связи, состояние «{entry.get('state')}»"
             self.log.ev("ROBOT", **entry, reason=reason)
 
+        # Монитор, не вышедший на связь, попытку не отменяет: летим оставшимися, а
+        # его четверть поля честно помечается «никто не смотрел» (этап 8). Звать его
+        # в разведку незачем — это только потерянные секунды на таймаутах.
+        self.offline = [
+            entry["name"]
+            for entry in report
+            if entry.get("error") and entry["name"] in self.fleet.monitors
+        ]
+
         # Без ровера миссия невыполнима: тратить время на планирование и
         # зарядку, чтобы упасть на первом же переезде, — худший способ узнать это.
         rover = next((e for e in report if e["role"] == "rover"), None)
@@ -432,10 +456,8 @@ class Dispatcher:
         """
         seen: list[vision.Observation] = []
         self.unverified = []
-        for name, drone in self.fleet.monitors.items():
-            self._scan_drone(name, drone, seen, offsets=())
-            if self._enough(seen):
-                break
+        self.problems = {}
+        self._scan_pass(seen, use_offsets=False)
         scene = vision.merge(seen, self.max_fire_count)
 
         if not scene.sure and self.cfg.get("survey.second_pass", True):
@@ -453,15 +475,99 @@ class Dispatcher:
                     + "Идём облётом точек обзора с возвратом на метку"
                 ),
             )
-            for name, drone in self.fleet.monitors.items():
-                self._scan_drone(name, drone, seen, offsets=self._offsets(name))
-                if self._enough(seen):
-                    break
+            self._scan_pass(seen, use_offsets=True)
             scene = vision.merge(seen, self.max_fire_count)
 
         self.fire_shot = self._best_shot(seen, scene)
+        self._log_coverage(seen)
         self._apply_scene(scene, len(seen))
         self.confirm_fire(scene)
+
+    # --- кто летит: все разом или по очереди ---------------------------------
+
+    def _scan_pass(self, seen: list, use_offsets: bool) -> None:
+        """Один проход разведки по всем мониторам, что вышли на связь."""
+        names = [name for name in self.fleet.monitors if name not in self.offline]
+        if self._together(names):
+            self._scan_together(names, seen, use_offsets)
+            return
+        for name in names:
+            offsets = self._offsets(name) if use_offsets else ()
+            error = self._scan_drone(
+                name, self.fleet.monitors[name], seen, offsets, self.unverified
+            )
+            if error:
+                self.problems[name] = error
+            # По очереди есть смысл останавливаться досрочно: каждый следующий взлёт
+            # стоит времени попытки. Одновременный взлёт этого выбора не оставляет —
+            # там дроны уже в воздухе, и полное покрытие поля дороже.
+            if self._enough(seen):
+                break
+
+    def _together(self, names: Sequence[str]) -> bool:
+        """Можно ли поднять мониторы одновременно.
+
+        Одновременный взлёт безопасен ровно потому, что монитор никуда не летит:
+        каждый висит над своей меткой в своём углу поля, пересекающихся маршрутов
+        нет. Появятся точки обзора (`survey.offsets`) — дроны снова поедут по полю,
+        и тогда только по очереди.
+
+        В моках (`transport: fake`) параллелить нечего и нельзя: аппараты живут в
+        общей памяти диспетчера и на виртуальных часах, которые из двух потоков
+        считать нельзя.
+        """
+        if self.survey_serial or len(names) < 2:
+            return False
+        if self.fleet.transport != "http":
+            return False
+        return not (self.cfg.get("survey.offsets", []) or [])
+
+    def _scan_together(self, names: Sequence[str], seen: list, use_offsets: bool) -> None:
+        """Все мониторы взлетают, снимают и садятся одновременно, каждый в своём потоке.
+
+        Наблюдения собираются в отдельные списки и сводятся в порядке из конфига:
+        иначе и лог, и голосование зависели бы от того, кто ответил первым, а
+        воспроизводимость прогона дороже пары строк кода.
+        """
+        mine: dict[str, list] = {name: [] for name in names}
+        landed: dict[str, list] = {name: [] for name in names}
+
+        def scan_one(name: str) -> None:
+            offsets = self._offsets(name) if use_offsets else ()
+            error = self._scan_drone(
+                name, self.fleet.monitors[name], mine[name], offsets, landed[name]
+            )
+            if error:
+                self.problems[name] = error
+
+        threads = [
+            threading.Thread(target=scan_one, args=(name,), daemon=True, name=f"survey-{name}")
+            for name in names
+        ]
+        for t in threads:
+            t.start()
+        # Срок общий на всех: взлетели вместе — значит и ждём их вместе, а не по
+        # SCAN_TIMEOUT на каждого по очереди.
+        deadline = time.monotonic() + SCAN_TIMEOUT
+        for t in threads:
+            t.join(max(0.0, deadline - time.monotonic()))
+        for name, t in zip(names, threads):
+            if t.is_alive():
+                self.problems.setdefault(
+                    name, f"не отчитался за {SCAN_TIMEOUT:g} с — разведку ждать перестали"
+                )
+                self.log.ev(
+                    "ERROR",
+                    error="Timeout",
+                    drone=name,
+                    reason=(
+                        f"монитор {name} не закончил разведку за {SCAN_TIMEOUT:g} с. "
+                        "Прогон идёт дальше, но этот дрон может остаться в воздухе — "
+                        "смотрите глазами и при необходимости жмите KILL SWITCH"
+                    ),
+                )
+            seen.extend(mine[name])
+            self.unverified.extend(landed[name])
 
     def _best_shot(self, seen: Sequence[vision.Observation], scene) -> str:
         """Кадр для VLM: тот, где очаг виден крупнее всего.
@@ -486,13 +592,25 @@ class Dispatcher:
         """Можно ли прекращать облёт: очаг найден и огоньки сосчитаны по целой кучке."""
         return self._stop_when_found() and vision.merge(seen, self.max_fire_count).sure
 
-    def _scan_drone(self, name: str, drone, seen: list, offsets: Sequence) -> None:
-        """Взлёт -> кадр с метки -> точки обзора с возвратом на метку -> посадка."""
+    def _scan_drone(
+        self, name: str, drone, seen: list, offsets: Sequence, unverified: list[str]
+    ) -> str:
+        """Взлёт -> кадр с метки -> точки обзора с возвратом на метку -> посадка.
+
+        Возвращает причину срыва по-русски или пустую строку. Причина нужна не для
+        управления, а для отчёта: без неё «этот угол поля не снят» неотличимо от
+        «на этом углу ничего не лежит».
+        """
         pad = as_cell(self.cfg.robots.monitors[name].pad)
         pad_xy = self.field.cell_to_m(pad)
+        error = ""
         try:
             drone.takeoff(self.survey_alt)
-            self._wait_state(drone, ("hover",), timeout=20.0)
+            # Ждать дольше самого взлёта: борт уходит вслепую только на первые 0,7 м,
+            # а остаток добирает шагами по метке и говорит «висит» в конце набора.
+            # Кадр до этого момента снят с промежуточной высоты — покрытие по нему
+            # посчиталось бы мимо.
+            self._wait_state(drone, ("hover",), timeout=45.0)
             if not offsets:
                 self._look_and_see(name, drone, pad_xy, seen, home=None)
             for point in offsets:
@@ -500,6 +618,7 @@ class Dispatcher:
                 if self._enough(seen):
                     break
         except RobotError as exc:
+            error = str(exc)
             self.log.ev(
                 "ERROR",
                 error="RobotError",
@@ -510,7 +629,8 @@ class Dispatcher:
             # Посадка обязательна, чем бы ни кончилась съёмка: сорвавшийся кадр
             # оставлял монитор висеть над полем до срабатывания сторожа борта.
             if self._park(drone, name) == "landed_unverified":
-                self.unverified.append(name)
+                unverified.append(name)
+        return error
 
     def _look_and_see(self, name: str, drone, point, seen: list, home) -> None:
         """Слетать в точку обзора, снять кадр, разобрать его и вернуться на метку.
@@ -547,6 +667,11 @@ class Dispatcher:
         нет. Разведка от этого не зависит ни в одной ветке.
         """
         if not self.ask_onboard:
+            return None
+        if not hasattr(drone, "fire"):
+            # Клиент борта, который про /fire не знает вовсе. Это то же самое
+            # ОТСУТСТВИЕ ВЕРДИКТА, что и 404 от старой прошивки, и разведку оно
+            # обрывать не вправе — иначе роскошь стала бы звеном управления.
             return None
         if self.onboard[name]["ok"] if name in self.onboard else False:
             # Второй проход разведки снимает кадр с той же площадки (survey.offsets
@@ -605,6 +730,7 @@ class Dispatcher:
             fire_cell=list(obs.fire_cell) if obs.fire_cell else None,
             anchor=obs.anchor,
             markers=obs.markers_seen,
+            cells=len(obs.seen_cells),
             area=round(obs.area, 1),
             fire_count=obs.fire_count,
             count_source=obs.count_source,
@@ -768,6 +894,103 @@ class Dispatcher:
             )
         return fill
 
+    # --- покрытие поля -------------------------------------------------------
+
+    def _log_coverage(self, seen: Sequence[vision.Observation]) -> None:
+        """Что из поля кто снял и чего никто не видел.
+
+        Главный вывод этапа 8. Один монитор с 2 м видит около четверти поля, поэтому
+        «очага не нашли» без этой сводки читается как «пожара нет», хотя на деле в
+        тот угол никто не смотрел. Отказ борта отсюда виден клетками поля, а не
+        только строкой об ошибке.
+        """
+        shots: dict[str, list] = {name: [] for name in self.fleet.monitors}
+        for obs in seen:
+            shots.setdefault(obs.drone, []).append(obs)
+
+        drones: dict[str, Any] = {}
+        covered: set = set()
+        blind_names: list[str] = []
+        seen_names: list[str] = []
+        for name in self.fleet.monitors:
+            pad = as_cell(self.cfg.robots.monitors[name].pad)
+            quad = self.field.quadrant(pad)
+            quarter = self.field.quadrant_cells(quad)
+            mine: set = set()
+            for obs in shots.get(name, []):
+                mine.update(as_cell(c) for c in obs.seen_cells)
+            covered |= mine
+            why = self._blind_reason(name, shots.get(name, []), mine)
+            (seen_names if not why else blind_names).append(name)
+            entry = {
+                "quarter": self.field.quadrant_name(quad),
+                "pad": list(pad),
+                "state": "blind" if why else "seen",
+                "shots": len(shots.get(name, [])),
+                "cells": len(mine),
+                "own_quarter": len(mine & set(quarter)),
+                "of": len(quarter),
+                "why": why,
+            }
+            # Борт мог сорвать один проход и отработать другой: четверть при этом снята,
+            # но сам отказ прятать нельзя — на площадке это повод посмотреть на дрон.
+            if not why and name in self.problems:
+                entry["trouble"] = self.problems[name]
+            drones[name] = entry
+
+        all_cells = set(self.field.cells())
+        blind_cells = sorted(all_cells - covered)
+        self.coverage = {
+            "seen": seen_names,
+            "blind": blind_names,
+            "blind_cells": [list(c) for c in blind_cells],
+            "drones": drones,
+        }
+        gaps = "; ".join(
+            f"четверть {name} ({drones[name]['quarter']}) не снята: {drones[name]['why']}"
+            for name in blind_names
+        )
+        self.log.ev(
+            "COVERAGE",
+            seen=seen_names,
+            blind=blind_names,
+            cells_seen=len(covered),
+            cells_total=len(all_cells),
+            blind_cells=self.coverage["blind_cells"],
+            drones=drones,
+            reason=(
+                f"поле снято {len(covered)} клетками из {len(all_cells)}"
+                + (f". {gaps}" if gaps else "; все четверти поля наблюдались")
+            ),
+        )
+
+    def _blind_reason(self, name: str, shots: Sequence[vision.Observation], cells: set) -> str:
+        """Почему монитор ничего не показал. Пустая строка — показал.
+
+        Снятые клетки решают всё: борт, сорвавший один проход и отработавший другой,
+        свою четверть видел, и записывать её в пробелы нельзя.
+        """
+        if cells:
+            return ""
+        if name in self.offline:
+            return "борт не вышел на связь на перекличке"
+        if name in self.problems:
+            return self.problems[name]
+        if not shots:
+            return "кадров с этого борта не пришло"
+        return "кадры сняты, но привязать их к полю не удалось: " + (
+            shots[-1].note or "меток в кадре нет и точка съёмки неизвестна"
+        )
+
+    def _blind_note(self) -> str:
+        """Одна фраза про пробелы разведки — для причин SURVEY и FIRE_SPOTTED."""
+        blind = self.coverage.get("blind") or []
+        if not blind:
+            return ""
+        drones = self.coverage.get("drones", {})
+        corners = ", ".join(f"{name} ({drones.get(name, {}).get('quarter', '?')})" for name in blind)
+        return f"четверти поля, которые никто не снял: {corners}"
+
     def _apply_scene(self, scene: vision.Scene, shots: int) -> None:
         """Итог разведки. Не нашли — так и пишем, а не подставляем тихо конфиг."""
         # Сверка с бортами идёт ДО записи итога: борт вправе закрыть дырку, а лог
@@ -775,6 +998,7 @@ class Dispatcher:
         # FIRE_SPOTTED скажет одно, а ровер поедет к другому.
         fill = self._check_onboard(scene) if self.onboard else {}
         if not scene.found and not fill.get("cell"):
+            blind_cells = {as_cell(c) for c in self.coverage.get("blind_cells", [])}
             self.log.ev(
                 "SURVEY",
                 source="config",
@@ -782,11 +1006,20 @@ class Dispatcher:
                 fire=list(self.sc.fire_cell),
                 fire_level=self.sc.fire_level,
                 landing_unverified=self.unverified,
+                blind=self.coverage.get("blind", []),
+                blind_cells=self.coverage.get("blind_cells", []),
                 reason=(
                     f"кадров снято {shots}, очаг ни на одном не распознан"
                     + (", бортовые вердикты тоже пусты" if self.onboard else "")
                     + f" — работаем по клетке из config.yaml {list(self.sc.fire_cell)}. "
                     "Проверьте пороги цвета: python3 -m city.vision <кадр> --debug"
+                    + (f"; {self._blind_note()}" if self._blind_note() else "")
+                    + (
+                        f"; клетку {list(self.sc.fire_cell)} из config.yaml никто не снимал — "
+                        "проверить её нечем, работаем по ней вслепую"
+                        if as_cell(self.sc.fire_cell) in blind_cells
+                        else ""
+                    )
                     + (
                         f"; посадку не подтвердили: {', '.join(self.unverified)}"
                         if self.unverified
@@ -863,6 +1096,7 @@ class Dispatcher:
             fire=list(cell),
             fire_level=self.sc.fire_level,
             landing_unverified=self.unverified,
+            blind=self.coverage.get("blind", []),
             level_source=level_source,
             cell_source=cell_source,
             reason=(
@@ -878,6 +1112,7 @@ class Dispatcher:
                     if level_source != "config" and was_level != self.sc.fire_level
                     else ""
                 )
+                + (f"; {self._blind_note()}" if self._blind_note() else "")
                 + (
                     f"; посадку не подтвердили: {', '.join(self.unverified)}"
                     if self.unverified
@@ -1233,7 +1468,9 @@ class Dispatcher:
             return
         vup = self.fleet.vup
         vup.takeoff(VUP_ALT)
-        self._wait_state(vup, ("hover",), timeout=20.0)
+        # Столько же, сколько монитору: если ВУП поднят нашим бортовым агентом, взлёт
+        # у него такой же двухступенчатый — вслепую, потом набор по метке.
+        self._wait_state(vup, ("hover",), timeout=45.0)
         vup.goto(self.sc.fire_cell, VUP_ALT)
         self._wait_state(vup, ("hover",), timeout=30.0)
         try:

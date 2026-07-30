@@ -6,7 +6,10 @@
 в этом файле.
 """
 
+import io
 import unittest
+from contextlib import redirect_stdout
+from unittest import mock
 
 from city import pult
 from city.robots.base import RobotError
@@ -20,14 +23,16 @@ class FakeDrone:
         self._fire = fire
         self.error = error
         self.trims: list[tuple[float, float]] = []
+        self.asked = 0  # сколько раз у борта спросили про огонь
 
     def status(self):
         return self._status
 
     def fire(self):
+        self.asked += 1
         if self.error:
             raise RobotError(self.error)
-        return self._fire
+        return self._fire or {"found": False, "note": "очага в кадре нет"}
 
     def trim(self, fwd, left):
         self.trims.append((fwd, left))
@@ -161,6 +166,81 @@ class TrimTest(Spoken):
         pult.do_trim(drone, "80 0")
         self.assertEqual(drone.trims, [])
         self.assertTrue(self.said("полуметра"))
+
+
+class BoardsTest(unittest.TestCase):
+    """`--all`: четыре борта берутся из config.yaml вместе с метками и площадками."""
+
+    def boards(self, argv):
+        return pult.build_boards(pult.build_parser().parse_args(argv))
+
+    def test_one_board_by_default(self):
+        boards = self.boards([])
+        self.assertEqual(len(boards), 1)
+        self.assertEqual(boards[0].name, "m1")
+
+    def test_all_takes_pads_and_markers_from_the_map(self):
+        """Номера меток на площадке путают чаще всего — руками их вводить не надо."""
+        boards = {b.name: b for b in self.boards(["--all"])}
+        self.assertEqual(sorted(boards), ["m1", "m2", "m3", "m4"])
+        self.assertEqual(boards["m1"].cell, "1,1")
+        self.assertEqual(boards["m1"].marker, 62)
+        self.assertEqual(boards["m3"].cell, "4,4")
+        self.assertEqual(boards["m3"].marker, 60)
+        self.assertEqual(len({b.marker for b in boards.values()}), 4)
+
+    def test_given_addresses_win_over_the_config(self):
+        boards = self.boards(["--all", "10.0.0.1,10.0.0.2"])
+        self.assertEqual([b.ip for b in boards], ["10.0.0.1", "10.0.0.2"])
+        self.assertEqual(boards[0].url, "http://10.0.0.1:2200")
+        self.assertEqual(boards[1].marker, 50)  # площадка m2, метка из карты
+
+    def test_more_addresses_than_drones_is_refused(self):
+        with self.assertRaises(RobotError):
+            self.boards(["--all", "1.1.1.1,2.2.2.2,3.3.3.3,4.4.4.4,5.5.5.5"])
+
+
+class ManyBoardsTest(Spoken):
+    """Команда без имени идёт всем бортам, с именем — одному."""
+
+    def setUp(self):
+        super().setUp()
+        args = pult.build_parser().parse_args([])
+        self.args = args
+        self.boards = []
+        for name in ("m1", "m2", "m3"):
+            board = pult.Board(name, "127.0.0.1", "sverk", "http://x", "1,1", 62)
+            board.drone = FakeDrone()
+            self.boards.append(board)
+
+    def typed(self, *lines):
+        # Подсказку со списком команд пульт печатает при входе в цикл: в отчёте
+        # тестов она только мешает.
+        with redirect_stdout(io.StringIO()):
+            with mock.patch("builtins.input", side_effect=[*lines, "выход"]):
+                pult.loop(self.boards, self.args)
+        return [b.drone.asked for b in self.boards]
+
+    def test_a_command_without_a_name_goes_to_everyone(self):
+        self.assertEqual(self.typed("огонь"), [1, 1, 1])
+
+    def test_a_named_command_goes_to_one_board(self):
+        self.assertEqual(self.typed("m2 огонь"), [0, 1, 0])
+
+    def test_a_name_alone_asks_what_to_do(self):
+        self.assertEqual(self.typed("m2"), [0, 0, 0])
+        self.assertTrue(self.said("что сделать борту m2"))
+
+    def test_trim_demands_a_single_board(self):
+        """Уводы у бортов разные: сдвинуть прицел всем разом — это испортить три."""
+        self.typed("сдвиг 10 8")
+        self.assertEqual([b.drone.trims for b in self.boards], [[], [], []])
+        self.assertTrue(self.said("сдвиг задаётся одному борту"))
+
+    def test_a_refusing_board_does_not_stop_the_others(self):
+        self.boards[0].drone.error = "нет связи"
+        self.assertEqual(self.typed("огонь"), [1, 1, 1])
+        self.assertTrue(self.said("не ответил про огонь"))
 
 
 if __name__ == "__main__":

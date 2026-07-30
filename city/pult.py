@@ -1,11 +1,16 @@
 """Пульт: одно окно вместо трёх.
 
-    python3 -m city.pult
+    python3 -m city.pult              один дрон
+    python3 -m city.pult --all        все четыре монитора разом
 
 Сам делает всё, что раньше приходилось разводить по трём терминалам:
 кладёт свежую бортовую программу на дрон, запускает её, показывает
 сообщения борта и ждёт команд с клавиатуры. На выходе сажает дрон и
 убирает за собой.
+
+С `--all` то же самое делается сразу с четырьмя бортами: адреса, площадки и
+номера меток берутся из `city/config.yaml`, команда без имени идёт всем, с
+именем — одному (`m2 кадр`). Один борт — частный случай списка из одного.
 
 Это наземный инструмент оператора, а не часть зачётного решения: в попытке
 командует диспетчер (`python3 -m city.run`), а пульт нужен, чтобы проверять
@@ -15,11 +20,13 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 
 from .robots.base import RobotError
 from .robots.http_robot import HttpRobot, wait_online
@@ -47,6 +54,9 @@ HELP = """
   стоп              аварийная посадка немедленно
   выход  (q)        посадить, всё выключить и выйти
 
+  Когда бортов несколько, команда без имени идёт ВСЕМ, а с именем — одному:
+  «m2 кадр», «m3 сдвиг 10 8». Взлёт и посадка уходят всем одновременно.
+
   Ctrl+C            отменить то, чего ждём сейчас (дрон остаётся как есть);
                     на пустой строке дважды подряд — выход
 """
@@ -60,13 +70,110 @@ WARNING = """
   ──────────────────────────────────────────────────────"""
 
 
+# Чьи это строки. Когда бортов четыре и они отвечают одновременно, без имени
+# отчёт превращается в кашу: «сел» без имени не говорит ничего.
+_who = threading.local()
+
+
 def say(text: str) -> None:
-    print(f"[{time.strftime('%H:%M:%S')}] {text}", flush=True)
+    who = getattr(_who, "name", "")
+    print(f"[{time.strftime('%H:%M:%S')}] {who + ' ' if who else ''}{text}", flush=True)
+
+
+@contextlib.contextmanager
+def speaking_for(name: str):
+    """Внутри этого блока все строки пульта подписаны именем борта."""
+    was = getattr(_who, "name", "")
+    _who.name = name
+    try:
+        yield
+    finally:
+        _who.name = was
+
+
+class Board:
+    """Один борт под пультом: адрес, имя, своя площадка и своя метка.
+
+    Одиночный запуск — это список из одного борта, поэтому отдельной ветки
+    «один дрон» в пульте нет и разойтись этим двум путям негде.
+    """
+
+    def __init__(self, name: str, ip: str, user: str, url: str, cell: str, marker: int | None):
+        self.name = name
+        self.ip = ip
+        self.host = f"{user}@{ip}"
+        self.url = url
+        self.cell = cell
+        self.marker = marker
+        self.drone: HttpRobot | None = None
+        self.log = f"/tmp/agent-{name}.log"
+        self.proc: subprocess.Popen | None = None
+        self.ready = False
+        self.counter = [0]  # номера сохранённых кадров, свои у каждого борта
+
+    def __repr__(self) -> str:
+        return f"Board({self.name} @ {self.ip})"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  СВЯЗЬ С БОРТОМ
 # ═══════════════════════════════════════════════════════════════════════════
+
+
+def markers_by_pad(cfg) -> dict[tuple[int, int], int]:
+    """Клетка площадки -> номер её метки. Обратная сторона aruco.pads из конфига."""
+    out = {}
+    for mid, cell in (cfg.get("aruco.pads", {}) or {}).items():
+        out[(int(cell[0]), int(cell[1]))] = int(mid)
+    return out
+
+
+def build_boards(args) -> list[Board]:
+    """Какими бортами командуем.
+
+    Без `--all` — один борт из ключей командной строки, как было всегда.
+    С `--all` — все мониторы из config.yaml: там же лежат их адреса, площадки и
+    (через aruco.pads) номера меток. Смысл в том, чтобы на площадке эти четыре
+    адреса правились в одном месте и одном файле — том самом, который читает
+    диспетчер. Список адресов через запятую перекрывает конфиг, не трогая его.
+    """
+    if args.all is None:
+        marker = args.marker
+        return [
+            Board(
+                args.name, args.ip, args.user,
+                f"http://{args.ip}:{args.net_port}", args.cell, marker,
+            )
+        ]
+
+    from . import config as config_mod
+
+    cfg = config_mod.load(args.config) if args.config else config_mod.load()
+    markers = markers_by_pad(cfg)
+    names = list(cfg.robots.monitors)
+    given = [ip.strip() for ip in args.all.split(",") if ip.strip()] if args.all else []
+    if len(given) > len(names):
+        raise RobotError(
+            f"адресов {len(given)}, а мониторов в config.yaml всего {len(names)}: "
+            f"{', '.join(names)}"
+        )
+    boards = []
+    for i, name in enumerate(names):
+        mon = cfg.robots.monitors[name]
+        if given:
+            if i >= len(given):
+                break
+            ip, url = given[i], f"http://{given[i]}:{args.net_port}"
+        else:
+            url = str(mon.url)
+            ip = urllib.parse.urlsplit(url).hostname or ""
+        pad = (int(mon.pad[0]), int(mon.pad[1]))
+        # Номер метки у каждого борта свой, поэтому общий ключ --marker здесь не
+        # применяется: он бы отправил все четыре дрона держаться за одну метку.
+        boards.append(Board(name, ip, args.user, url, f"{pad[0]},{pad[1]}", markers.get(pad)))
+    if not boards:
+        raise RobotError("в config.yaml нет ни одного дрона-монитора")
+    return boards
 
 
 def ssh(host: str, command: str, timeout: float = 30.0) -> subprocess.CompletedProcess:
@@ -93,33 +200,33 @@ def upload(host: str, quiet: bool) -> None:
         say("программа на борту обновлена")
 
 
-def start_agent(host: str, args) -> tuple[str, subprocess.Popen]:
-    """Остановить старую программу и запустить новую. Возвращает путь к логу и само соединение.
+def start_agent(board: Board, args) -> subprocess.Popen:
+    """Остановить старую программу и запустить новую. Возвращает само соединение.
 
     Запуск идёт через Popen без ожидания: ssh не возвращает управление, пока на
     том конце жив запущенный процесс, а он живёт до конца полётов. Ждём не команду,
     а появление нужной строки в логе (wait_ready).
     """
-    log = f"/tmp/agent-{args.name}.log"
+    host = board.host
     # Скобки не опечатка: без них pkill находит и убивает собственную же команду.
     ssh(host, 'pkill -9 -f "[d]rone_agent" || true')
     time.sleep(1.5)
-    ssh(host, f"rm -f {log}")
+    ssh(host, f"rm -f {board.log}")
     launch = (
         f"{REMOTE_DIR}/run_agent.sh"
-        f" --name {args.name} --cell {args.cell} --port {args.port}"
+        f" --name {board.name} --cell {board.cell} --port {args.port}"
         f" --watchdog {args.watchdog} --color {args.color} --alt {args.alt}"
-        + (f" --marker {args.marker}" if args.marker is not None else "")
+        + (f" --marker {board.marker}" if board.marker is not None else "")
         + (" --no-yaw-hold" if args.no_yaw_hold else "")
         + (" --no-hold" if args.no_hold else "")
         + (f" --fov-deg {args.fov_deg}" if args.fov_deg is not None else "")
-        + f" </dev/null >{log} 2>&1"
+        + f" </dev/null >{board.log} 2>&1"
     )
     proc = subprocess.Popen(
         ["ssh", "-n", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", host, launch],
         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    return log, proc
+    return proc
 
 
 def wait_ready(host: str, log: str, seconds: float = 40.0) -> None:
@@ -131,7 +238,7 @@ def wait_ready(host: str, log: str, seconds: float = 40.0) -> None:
         if out != seen:
             for line in out[len(seen):].splitlines():
                 if line.strip():
-                    print(f"  борт | {line}", flush=True)
+                    print(f"  {getattr(_who, 'name', '') or 'борт'} | {line}", flush=True)
             seen = out
         if "слушает порт" in out:
             return
@@ -141,10 +248,10 @@ def wait_ready(host: str, log: str, seconds: float = 40.0) -> None:
     raise RobotError(f"борт не отозвался за {seconds:g} с — проверьте питание и сеть")
 
 
-def tail_log(host: str, log: str, stop: threading.Event) -> None:
+def tail_log(board: Board, stop: threading.Event) -> None:
     """Показывать сообщения борта в этом же окне, пока пульт работает."""
     proc = subprocess.Popen(
-        ["ssh", "-n", "-o", "BatchMode=yes", host, f"tail -n0 -f {log}"],
+        ["ssh", "-n", "-o", "BatchMode=yes", board.host, f"tail -n0 -f {board.log}"],
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
     )
     try:
@@ -152,7 +259,7 @@ def tail_log(host: str, log: str, stop: threading.Event) -> None:
             if stop.is_set():
                 break
             if line.strip():
-                print(f"\n  борт | {line.rstrip()}", flush=True)
+                print(f"\n  {board.name} | {line.rstrip()}", flush=True)
     finally:
         proc.terminate()
 
@@ -164,13 +271,18 @@ def tail_log(host: str, log: str, stop: threading.Event) -> None:
 
 def show_status(drone: HttpRobot) -> dict:
     st = drone.status()
-    words = {"idle": "стоит на земле", "taking_off": "взлетает", "hover": "висит",
+    words = {"idle": "стоит на земле", "taking_off": "взлетает",
+             "climbing": "добирает высоту по метке", "hover": "висит",
              "landing": "садится", "landed": "сел (подтверждено)",
              "landed_unverified": "сел, но борт не поручился — посмотрите глазами",
              "land_failed": "ПОСАДКА НЕ ПРИНЯТА БОРТОМ", "error": "ОШИБКА"}
     say(f"{words.get(st.get('state'), st.get('state'))}, "
         f"высота {st.get('alt', 0):.1f} м, клетка {st.get('cell')}, "
         f"камера {'готова' if st.get('camera') else 'НЕ ГОТОВА'}")
+    if st.get("climb_left") is not None:
+        # Высота в строке выше — ЦЕЛЬ, а не то, где дрон сейчас: остаток он ещё
+        # набирает шагами, правя при этом место и курс по метке.
+        say(f"набор идёт: до рабочей высоты ещё {st['climb_left']:.2f} м")
     if "yaw_ref" in st:
         # Курс борт держит по метке своей площадки. «Нечем» — метки под дроном не
         # видно: перелёты в это время идут без поправки, и увод копится.
@@ -184,9 +296,16 @@ def show_status(drone: HttpRobot) -> dict:
         # alt_seen = null означает «метку не вижу», а не «высота ноль».
         if st.get("marker_lost"):
             say(f"метку {st['marker']} ПОТЕРЯЛ ({st.get('blind', 0)} кадров подряд) — "
-                f"ищу: подъёмов {st.get('search_rises', 0)}, отходы по сторонам")
+                f"ищу: поднялся на {st.get('above', 0.0):.2f} м, отходы по сторонам")
         elif st.get("alt_seen") is None:
-            say(f"метки {st['marker']} в этом кадре не видно (подряд: {st.get('blind', 0)})")
+            # Либо метки в кадре нет, либо эталон высоты ещё не снят: до него борт
+            # высоту не правит вовсе, и это надо различать — иначе «не вижу метку»
+            # прочтётся как поломка там, где дрон просто ещё успокаивается.
+            if st.get("side_ref") is None and st.get("blind", 0) == 0:
+                say(f"метка {st['marker']} в кадре, эталон высоты ещё снимается")
+            else:
+                say(f"метки {st['marker']} в этом кадре не видно "
+                    f"(подряд: {st.get('blind', 0)})")
         else:
             # «отрабатываю поправку» — это не зависший борт: такт намеренно молчит,
             # пока прошлый сдвиг доезжает, иначе замер снимался бы с накренённого
@@ -320,18 +439,28 @@ def wait_done(drone: HttpRobot, seconds: float) -> bool:
     return False
 
 
-def do_takeoff(drone: HttpRobot, alt: float, confirmed: list[bool]) -> None:
-    if not confirmed[0]:
-        print(WARNING)
-        answer = input("  всё так? напечатайте «да» и Enter: ").strip().lower()
-        if answer not in ("да", "da", "yes", "y"):
-            say("взлёт отменён")
-            return
-        confirmed[0] = True
+def ask_takeoff(confirmed: list[bool], count: int = 1) -> bool:
+    """Спросить оператора один раз за сеанс — и один раз на все борта сразу."""
+    if confirmed[0]:
+        return True
+    print(WARNING)
+    if count > 1:
+        print(f"   ВЗЛЕТАЮТ СРАЗУ {count} ДРОНА — проверьте зону под каждым")
+    answer = input("  всё так? напечатайте «да» и Enter: ").strip().lower()
+    if answer not in ("да", "da", "yes", "y"):
+        say("взлёт отменён")
+        return False
+    confirmed[0] = True
+    return True
+
+
+def do_takeoff(drone: HttpRobot, alt: float) -> None:
     say(f"команда на взлёт, высота {alt:g} м")
     drone.takeoff(alt)
-    say("жду, пока встанет в воздухе…")
-    if wait_state(drone, ("hover",), 25):
+    # Ждать приходится дольше самого взлёта: вслепую борт уходит только на первые
+    # 0,7 м, а остаток добирает шагами по метке, и «висит» он скажет в конце набора.
+    say("жду, пока наберёт высоту…")
+    if wait_state(drone, ("hover",), 45):
         say("дрон висит — можно снимать кадр")
     else:
         say("ВНИМАНИЕ: подъём не подтвердился, смотрите строки борта выше")
@@ -365,6 +494,11 @@ def do_trim(drone: HttpRobot, rest: str) -> None:
     say("посмотрите на дрон снова: осталось смещение — повторите «сдвиг» на остаток")
 
 
+def do_stop(drone: HttpRobot) -> None:
+    drone.stop()
+    say("аварийная посадка")
+
+
 def do_land(drone: HttpRobot) -> None:
     say("команда на посадку")
     drone.land()
@@ -383,10 +517,42 @@ def do_land(drone: HttpRobot) -> None:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-def loop(drone: HttpRobot, args) -> None:
-    counter = [0]
+def for_each(boards: list[Board], action, together: bool = False) -> None:
+    """Сделать одно и то же на каждом борту. Отказ одного не отменяет остальных.
+
+    `together=True` — команды уходят одновременно (взлёт, посадка, «стоп»): ждать
+    посадки четырёх дронов по очереди значит держать три из них в воздухе лишние
+    полминуты. Всё остальное идёт по очереди, чтобы отчёт читался сверху вниз.
+    """
+    def run(board: Board) -> None:
+        with speaking_for(board.name if len(boards) > 1 else ""):
+            try:
+                action(board)
+            except RobotError as exc:
+                say(f"борт отказал: {exc}")
+
+    if len(boards) == 1 or not together:
+        for board in boards:
+            run(board)
+        return
+    threads = [threading.Thread(target=run, args=(b,), daemon=True) for b in boards]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+
+def pick(boards: list[Board], word: str) -> list[Board] | None:
+    """Разобрать имя борта в начале строки: «m2 кадр» — только этому."""
+    chosen = [b for b in boards if b.name.lower() == word]
+    return chosen or None
+
+
+def loop(boards: list[Board], args) -> None:
     confirmed = [False]
     print(HELP)
+    if len(boards) > 1:
+        say("команда без имени идёт всем бортам: " + ", ".join(b.name for b in boards))
     asked_to_quit = False
     while True:
         try:
@@ -406,26 +572,40 @@ def loop(drone: HttpRobot, args) -> None:
         if not line:
             continue
         word, _, rest = line.partition(" ")
+        # Имя борта в начале строки: «m2 кадр» — команда одному, без имени — всем.
+        here = boards
+        named = pick(boards, word)
+        if named is not None:
+            here = named
+            word, _, rest = rest.strip().partition(" ")
+            if not word:
+                say(f"что сделать борту {here[0].name}? например: {here[0].name} кадр")
+                continue
         try:
             if word in ("статус", "с", "s"):
-                show_status(drone)
+                for_each(here, lambda b: show_status(b.drone))
             elif word in ("кадр", "к", "k"):
-                take_shot(drone, counter)
+                # Открывать картинку сразу — только когда борт один: четыре окна
+                # поверх пульта появятся ровно тогда, когда дроны в воздухе.
+                for_each(here, lambda b: take_shot(b.drone, b.counter, open_it=len(here) == 1))
             elif word in ("взлет", "взлёт", "в", "v"):
                 alt = float(rest) if rest.strip() else args.alt
                 if alt > args.max_alt:
                     say(f"выше {args.max_alt:g} м нельзя (регламент: потолок 4 м)")
                     continue
-                do_takeoff(drone, alt, confirmed)
+                if ask_takeoff(confirmed, len(here)):
+                    for_each(here, lambda b: do_takeoff(b.drone, alt), together=True)
             elif word in ("огонь", "о", "o"):
-                do_fire(drone)
+                for_each(here, lambda b: do_fire(b.drone))
             elif word in ("сдвиг", "прицел"):
-                do_trim(drone, rest)
+                if len(here) > 1:
+                    say("сдвиг задаётся одному борту: «m2 сдвиг 10 8» — уводы у них разные")
+                    continue
+                do_trim(here[0].drone, rest)
             elif word in ("сесть", "посадка", "п", "l"):
-                do_land(drone)
+                for_each(here, lambda b: do_land(b.drone), together=True)
             elif word == "стоп":
-                drone.stop()
-                say("аварийная посадка")
+                for_each(here, lambda b: do_stop(b.drone), together=True)
             elif word in ("выход", "q", "exit"):
                 return
             elif word in ("помощь", "?", "h"):
@@ -445,15 +625,14 @@ def loop(drone: HttpRobot, args) -> None:
                 "проверьте командой «статус»")
 
 
-def shutdown(drone, host: str, agent_proc, stop: threading.Event, keep: bool) -> None:
-    """Выход. Ctrl+C здесь не роняет пульт: посадка важнее красивого завершения."""
-    say("завершаю работу")
+def shutdown_one(board: Board, keep: bool) -> None:
+    """Выход по одному борту. Ctrl+C здесь не роняет пульт: посадка важнее завершения."""
     landing_broken = False
-    if drone is not None:
+    if board.drone is not None:
         try:
-            if drone.status().get("state") in ("taking_off", "hover"):
+            if board.drone.status().get("state") in ("taking_off", "climbing", "hover"):
                 say("дрон в воздухе — сажаю перед выходом")
-                do_land(drone)
+                do_land(board.drone)
         except RobotError as exc:
             # Молчать нельзя: мы выходим, а дрон, возможно, остался в воздухе.
             landing_broken = True
@@ -462,7 +641,6 @@ def shutdown(drone, host: str, agent_proc, stop: threading.Event, keep: bool) ->
             print()
             landing_broken = True
             say("посадку прервали на середине")
-    stop.set()
     if keep:
         say("программа на борту оставлена работать (--keep)")
         return
@@ -473,18 +651,34 @@ def shutdown(drone, host: str, agent_proc, stop: threading.Event, keep: bool) ->
         say("если дрон всё же висит — сажайте пультом")
         return
     try:
-        ssh(host, 'pkill -9 -f "[d]rone_agent" || true')
-        if agent_proc is not None:
-            agent_proc.terminate()
+        ssh(board.host, 'pkill -9 -f "[d]rone_agent" || true')
+        if board.proc is not None:
+            board.proc.terminate()
         say("программа на борту остановлена")
     except KeyboardInterrupt:
         print()
         say("не успел остановить программу на борту — она останется работать")
 
 
+def shutdown(boards: list[Board], stop: threading.Event, keep: bool) -> None:
+    """Выход: посадить и погасить все борта. Отказ одного не отменяет остальных."""
+    say("завершаю работу")
+    # Посадка идёт одновременно по той же причине, что и в полёте: пока сажаешь
+    # первого по очереди, остальные три висят.
+    for_each(boards, lambda b: shutdown_one(b, keep), together=True)
+    stop.set()
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="пульт: запустить дрон и командовать им в одном окне")
     p.add_argument("--ip", default=DRONE_IP, help=f"адрес дрона (по умолчанию {DRONE_IP})")
+    p.add_argument(
+        "--all", nargs="?", const="", default=None, metavar="АДРЕСА",
+        help="работать сразу со всеми мониторами из config.yaml (адреса, площадки и "
+             "номера меток берутся оттуда). Через запятую можно задать адреса свои: "
+             "--all 192.168.1.105,192.168.1.106,192.168.1.107,192.168.1.108",
+    )
+    p.add_argument("--config", default=None, help="путь к config.yaml (по умолчанию свой)")
     p.add_argument("--user", default=USER)
     p.add_argument("--name", default="m1", help="имя борта")
     p.add_argument("--cell", default="1,1", help="на какой площадке стоит, col,row")
@@ -518,54 +712,86 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def bring_up(board: Board, args, stop: threading.Event) -> None:
+    """Поднять один борт: связь -> свежая программа -> запуск -> ответ по сети.
+
+    Ошибка не глушится, а поднимается наверх: решает, что делать дальше, тот, кто
+    знает, сколько бортов ещё живо.
+    """
+    say(f"{board.ip}: проверяю связь")
+    if ssh(board.host, "echo ok").stdout.strip() != "ok":
+        raise RobotError(
+            "нет входа по ssh. Один раз выполните:\n"
+            f"           ssh-copy-id -i ~/.ssh/id_ed25519_1schedule.pub {board.host}"
+            "     (пароль: sverk)"
+        )
+
+    if not args.no_upload:
+        upload(board.host, args.quiet)
+
+    if args.no_restart:
+        say("программу на борту не трогаю (--no-restart)")
+    else:
+        say("запускаю программу на борту (ROS поднимается небыстро, это нормально)")
+        board.proc = start_agent(board, args)
+        wait_ready(board.host, board.log)
+
+    board.drone = HttpRobot(board.url, name=board.name)
+    say(f"зову борт: {board.url}")
+    try:
+        st = wait_online(board.drone, seconds=15)
+    except RobotError as exc:
+        # Программа на борту запустилась (её строку мы видели выше), а снаружи её не
+        # слышно — значит дело не в программе, а в пробросе порта. Говорим об этом
+        # прямо: искать в железе дешевле, чем перезапускать агент по кругу.
+        raise RobotError(
+            f"{exc}\n"
+            f"           борт работает, но снаружи не отвечает. Похоже, на этом дроне\n"
+            f"           нет проброса {args.net_port} → {args.port} внутрь контейнера.\n"
+            f"           Проверьте у того, кто настраивал дрон, или: "
+            f"curl {board.url}/status"
+        ) from exc
+    if not st.get("camera"):
+        say("КАМЕРА НЕ ГОТОВА — кадров не будет, взлетать не надо")
+    board.ready = True
+    threading.Thread(target=tail_log, args=(board, stop), daemon=True).start()
+    say(f"готово, метка {board.marker if board.marker is not None else 'из карты поля'}, "
+        f"площадка {board.cell}")
+
+
+def start_board(board: Board, args, stop: threading.Event) -> None:
+    """Поднять борт и не уронить пульт, если этот борт не поднялся."""
+    try:
+        bring_up(board, args, stop)
+    except RobotError as exc:
+        say(f"НЕ ПОДНЯЛСЯ: {exc}")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    host = f"{args.user}@{args.ip}"
-    url = f"http://{args.ip}:{args.net_port}"
     stop = threading.Event()
-    agent_proc = None
-    drone: HttpRobot | None = None
+    boards: list[Board] = []
 
     try:
-        say(f"дрон {args.ip}: проверяю связь")
-        if ssh(host, "echo ok").stdout.strip() != "ok":
-            say("нет входа по ssh. Один раз выполните:")
-            say(f"  ssh-copy-id -i ~/.ssh/id_ed25519_1schedule.pub {host}     (пароль: sverk)")
+        boards = build_boards(args)
+        if args.marker is not None and args.all is not None:
+            say("ключ --marker со списком бортов не применяется: у каждого метка своя, "
+                "они берутся из config.yaml")
+        # Борта поднимаются одновременно: четыре ROS по очереди — это четыре минуты
+        # ожидания там, где хватает одной.
+        for_each(boards, lambda b: start_board(b, args, stop), together=True)
+
+        live = [b for b in boards if b.ready]
+        if not live:
+            say("НЕ ПОЛУЧИЛОСЬ: ни один борт не поднялся")
             return 1
-
-        if not args.no_upload:
-            upload(host, args.quiet)
-
-        if args.no_restart:
-            log = f"/tmp/agent-{args.name}.log"
-            say("программу на борту не трогаю (--no-restart)")
-        else:
-            say("запускаю программу на борту (ROS поднимается небыстро, это нормально)")
-            log, agent_proc = start_agent(host, args)
-            wait_ready(host, log)
-
-        drone = HttpRobot(url, name=args.name)
-        say(f"зову борт: {url}")
-        try:
-            st = wait_online(drone, seconds=15)
-        except RobotError as exc:
-            # Программа на борту запустилась (её строку мы видели выше), а снаружи её не
-            # слышно — значит дело не в программе, а в пробросе порта. Говорим об этом
-            # прямо: искать в железе дешевле, чем перезапускать агент по кругу.
-            raise RobotError(
-                f"{exc}\n"
-                f"           борт работает, но снаружи не отвечает. Похоже, на этом дроне\n"
-                f"           нет проброса {args.net_port} → {args.port} внутрь контейнера.\n"
-                f"           Проверьте у того, кто настраивал дрон, или: "
-                f"curl {url}/status"
-            ) from exc
-        if not st.get("camera"):
-            say("КАМЕРА НЕ ГОТОВА — кадров не будет, взлетать не надо")
-
-        threading.Thread(target=tail_log, args=(host, log, stop), daemon=True).start()
-        say("готово. Дрон ждёт команд")
-        show_status(drone)
-        loop(drone, args)
+        if len(live) < len(boards):
+            dead = ", ".join(b.name for b in boards if not b.ready)
+            say(f"ВНИМАНИЕ: не поднялись борта {dead} — работаю остальными. "
+                "В попытке их четверти поля останутся неснятыми")
+        say(f"бортов под пультом: {', '.join(b.name for b in live)}")
+        for_each(live, lambda b: show_status(b.drone))
+        loop(live, args)
         return 0
 
     except RobotError as exc:
@@ -577,7 +803,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     finally:
         try:
-            shutdown(drone, host, agent_proc, stop, args.keep)
+            shutdown([b for b in boards if b.drone is not None or b.proc is not None],
+                     stop, args.keep)
         except KeyboardInterrupt:
             print()
             say("выход прерван — программа на борту могла остаться работать")

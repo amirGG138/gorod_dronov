@@ -20,6 +20,7 @@ EVENT_TYPES = (
     "ROBOT",
     "MSG",
     "SCAN",
+    "COVERAGE",
     "FIRE_CHECK",
     "FIRE_SPOTTED",
     "FIRE_TARGET",
@@ -77,9 +78,10 @@ class Log:
         self.path = os.path.join(run_dir, f"run-{stamp}.jsonl")
         self._fh = open(self.path, "w", encoding="utf-8")
         self.counts: dict[str, int] = {}
-        # Пишут несколько потоков: аварийная остановка рассылает «стоп» всем
-        # аппаратам параллельно (city/robots/fleet.py), и каждая команда теперь
-        # оставляет запись MSG. Без замка две строки JSONL склеиваются — и ломается
+        # Пишут несколько потоков: четыре монитора работают одновременно, каждый
+        # в своём (этап 8), а аварийная остановка рассылает «стоп» всем аппаратам
+        # параллельно (city/robots/fleet.py), и каждая команда теперь оставляет
+        # запись MSG. Без замка строки JSONL склеиваются посреди слова — и ломается
         # ровно тот файл, который сдают как лог решений.
         self._lock = threading.Lock()
 
@@ -137,6 +139,12 @@ class Log:
                 f"{r.get('drone')} точка ({r.get('xy', ['?', '?'])[0]}, {r.get('xy', ['?', '?'])[1]}) "
                 f"привязка={r.get('anchor')} {seen}"
             )
+        if type_ == "COVERAGE":
+            seen, blind = r.get("seen") or [], r.get("blind") or []
+            body = f"сняли: {', '.join(seen) or '—'}"
+            if blind:
+                body += f"; НЕ СНЯЛИ: {', '.join(blind)}"
+            return f"{body}; клеток видно {r.get('cells_seen')}/{r.get('cells_total')}"
         if type_ == "FIRE_SPOTTED":
             return (
                 f"{_fmt_cell(r.get('cell'))} голосов {r.get('votes')}/{r.get('total')} "

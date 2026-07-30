@@ -70,6 +70,38 @@ class Field:
         row = round(ly / self.cell + (self.rows - 1) / 2.0)
         return (int(col), int(row))
 
+    # --- четверти поля ------------------------------------------------------
+
+    def quadrant(self, cell: Sequence[int]) -> Cell:
+        """В какой четверти поля лежит клетка: (0|1, 0|1) по осям col и row.
+
+        Четверть — это доля поля, за которую отвечает один дрон-монитор (этап 8).
+        Деление ровно пополам по каждой оси: на поле 6x6 четверть выходит блоком
+        3x3, и площадки [1,1] [4,1] [1,4] [4,4] оказываются в их центрах — то есть
+        дрон, висящий над своей меткой, снимает середину своей четверти.
+        """
+        col, row = as_cell(cell)
+        return (0 if col * 2 < self.cols else 1, 0 if row * 2 < self.rows else 1)
+
+    def quadrant_cells(self, quad: Sequence[int]) -> list[Cell]:
+        """Все клетки четверти, слева направо и снизу вверх."""
+        qx, qy = as_cell(quad)
+        return [
+            (col, row)
+            for row in range(self.rows)
+            for col in range(self.cols)
+            if self.quadrant((col, row)) == (qx, qy)
+        ]
+
+    def quadrant_name(self, quad: Sequence[int]) -> str:
+        """Название четверти по-русски: так её видит человек в логе и на техзащите."""
+        qx, qy = as_cell(quad)
+        return f"{'дальняя' if qy else 'ближняя'} {'правая' if qx else 'левая'}"
+
+    def cells(self) -> list[Cell]:
+        """Все клетки поля, слева направо и снизу вверх."""
+        return [(col, row) for row in range(self.rows) for col in range(self.cols)]
+
     # --- связность ----------------------------------------------------------
 
     def in_bounds(self, cell: Sequence[int]) -> bool:
