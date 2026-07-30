@@ -83,32 +83,35 @@ class TestBrokenMonitorDoesNotStopTheRun(unittest.TestCase):
     def setUp(self):
         cfg = with_drones()
 
-        def break_m2(fleet):
+        # Ломаем именно тот борт, в четверти которого лежит очаг (`scenario.fire.cell`
+        # = [4, 2], площадка m4 = [4, 1]): иначе пробел покрытия остался бы без
+        # последствий и уровень пожара всё равно посчитался бы по кадрам.
+        def break_m4(fleet):
             def refuse(alt):
-                raise RobotError("m2: взлёт не принят")
+                raise RobotError("m4: взлёт не принят")
 
-            fleet.monitors["m2"].takeoff = refuse
+            fleet.monitors["m4"].takeoff = refuse
 
-        self.code, self.events, self.fleet = run_dispatcher(cfg, prepare=break_m2)
+        self.code, self.events, self.fleet = run_dispatcher(cfg, prepare=break_m4)
         self.cov = coverage_of(self.events)
 
     def test_the_run_finishes(self):
         self.assertEqual(self.code, 0)
 
     def test_the_quarter_is_marked_blind_with_a_reason(self):
-        self.assertEqual(self.cov["blind"], ["m2"])
-        self.assertIn("взлёт не принят", self.cov["drones"]["m2"]["why"])
-        self.assertEqual(self.cov["drones"]["m2"]["cells"], 0)
+        self.assertEqual(self.cov["blind"], ["m4"])
+        self.assertIn("взлёт не принят", self.cov["drones"]["m4"]["why"])
+        self.assertEqual(self.cov["drones"]["m4"]["cells"], 0)
 
     def test_the_other_three_worked(self):
-        self.assertEqual(sorted(self.cov["seen"]), ["m1", "m3", "m4"])
+        self.assertEqual(sorted(self.cov["seen"]), ["m1", "m2", "m3"])
         self.assertEqual(self.cov["cells_seen"], self.cov["cells_total"] - 9)
 
     def test_the_survey_says_out_loud_which_corner_nobody_saw(self):
         """Очаг лежит как раз в четверти отказавшего борта — молчать об этом нельзя."""
         survey = [e for e in self.events if e["type"] == "SURVEY"][-1]
         self.assertEqual(survey["source"], "config")
-        self.assertEqual(survey["blind"], ["m2"])
+        self.assertEqual(survey["blind"], ["m4"])
         self.assertIn("никто не снял", survey["reason"])
         self.assertIn("вслепую", survey["reason"])
 

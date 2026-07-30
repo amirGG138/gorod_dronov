@@ -271,13 +271,18 @@ def tail_log(board: Board, stop: threading.Event) -> None:
 
 def show_status(drone: HttpRobot) -> dict:
     st = drone.status()
-    words = {"idle": "стоит на земле", "taking_off": "взлетает", "hover": "висит",
+    words = {"idle": "стоит на земле", "taking_off": "взлетает",
+             "climbing": "добирает высоту по метке", "hover": "висит",
              "landing": "садится", "landed": "сел (подтверждено)",
              "landed_unverified": "сел, но борт не поручился — посмотрите глазами",
              "land_failed": "ПОСАДКА НЕ ПРИНЯТА БОРТОМ", "error": "ОШИБКА"}
     say(f"{words.get(st.get('state'), st.get('state'))}, "
         f"высота {st.get('alt', 0):.1f} м, клетка {st.get('cell')}, "
         f"камера {'готова' if st.get('camera') else 'НЕ ГОТОВА'}")
+    if st.get("climb_left") is not None:
+        # Высота в строке выше — ЦЕЛЬ, а не то, где дрон сейчас: остаток он ещё
+        # набирает шагами, правя при этом место и курс по метке.
+        say(f"набор идёт: до рабочей высоты ещё {st['climb_left']:.2f} м")
     if "yaw_ref" in st:
         # Курс борт держит по метке своей площадки. «Нечем» — метки под дроном не
         # видно: перелёты в это время идут без поправки, и увод копится.
@@ -452,8 +457,10 @@ def ask_takeoff(confirmed: list[bool], count: int = 1) -> bool:
 def do_takeoff(drone: HttpRobot, alt: float) -> None:
     say(f"команда на взлёт, высота {alt:g} м")
     drone.takeoff(alt)
-    say("жду, пока встанет в воздухе…")
-    if wait_state(drone, ("hover",), 25):
+    # Ждать приходится дольше самого взлёта: вслепую борт уходит только на первые
+    # 0,7 м, а остаток добирает шагами по метке, и «висит» он скажет в конце набора.
+    say("жду, пока наберёт высоту…")
+    if wait_state(drone, ("hover",), 45):
         say("дрон висит — можно снимать кадр")
     else:
         say("ВНИМАНИЕ: подъём не подтвердился, смотрите строки борта выше")
@@ -623,7 +630,7 @@ def shutdown_one(board: Board, keep: bool) -> None:
     landing_broken = False
     if board.drone is not None:
         try:
-            if board.drone.status().get("state") in ("taking_off", "hover"):
+            if board.drone.status().get("state") in ("taking_off", "climbing", "hover"):
                 say("дрон в воздухе — сажаю перед выходом")
                 do_land(board.drone)
         except RobotError as exc:

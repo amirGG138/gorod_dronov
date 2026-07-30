@@ -45,9 +45,22 @@
 ней едет и висит с креном, — верный способ получить качку вместо зависания. Разбор в
 докстроке hold_tick.
 
-Взлёт идёт ОДНОЙ командой, и контур включается только после того, как набор кончился
-(время набора + --settle + --lock-wait). Иначе он видит недобор высоты, который уже
-отрабатывается командой взлёта, и досылает его поверх — набор складывается сам с собой.
+Взлёт идёт В ДВЕ СТУПЕНИ (с 30.07.2026). Первая — --takeoff-blind метров (0,7) ОДНОЙ
+командой вслепую: с площадки метка в кадр не помещается, держаться на этой ступени не
+за что. Вторая — остаток до рабочей высоты, и его набирает уже контур удержания:
+шагами по --climb-step, и каждый шаг он попутно правит положение и курс ПО МЕТКЕ, а
+вот высоту по метке не мерит вовсе — сколько осталось набрать, борт знает по своим же
+командам. Высота начинает мериться по метке только после того, как набор кончился:
+тогда снимается эталон (см. alt_by_ref) и включается обычное удержание.
+
+Почему высота на наборе именно по счёту, а не по метке. navigate не блокирующий, и
+пока дрон едет вверх, кадр показывает высоту, которая уже отрабатывается: контур,
+меряющий её в этот момент, видит недобор, досылает его поверх — и набор складывается
+сам с собой. Со счётом этого нет: борт вычитает из остатка ровно то, что скомандовал,
+и следующий шаг уходит только после того, как предыдущий доехал (--settle).
+
+Состояние на время набора — climbing, а не hover: «вишу» означает «стою на рабочей
+высоте», и диспетчер по нему решает, можно ли снимать кадр для огня.
 
 Метки нет в кадре — держаться не за что, и после --blind-max таких кадров борт не
 замирает, а ИЩЕТ её: поднимается на --search-rise (шире обзор) и по очереди отходит на
@@ -100,6 +113,11 @@ DEDUP_KEEP = 64
 # Состояния, означающие «дрон не в воздухе». landed — посадка подтверждена
 # телеметрией, landed_unverified — команда принята и пауза выждана, доказательств нет.
 ON_GROUND = ("idle", "landed", "landed_unverified")
+
+# Состояния «дрон в воздухе»: сюда же входит climbing — набор остатка высоты контуром
+# после слепой ступени взлёта. Всё, что сажает дрон по факту «мы наверху» (сторож,
+# выход из программы, защита от второго взлёта), смотрит именно сюда.
+ALOFT = ("taking_off", "climbing", "hover")
 
 # Сторона метки площадки, м (docs/field-map/map.txt). По ней кадр переводится в метры,
 # поэтому ошибка здесь даёт систематический промах и «плавающую» высоту: перемерить
@@ -750,7 +768,7 @@ class Agent:
         self.pad = list(self.cell)
         self.xy = self.cell_to_m(self.cell)
         self.alt = 0.0                  # высота, на которой дрон ДОЛЖЕН висеть
-        # idle | taking_off | hover | landing | landed | landed_unverified
+        # idle | taking_off | climbing | hover | landing | landed | landed_unverified
         # | land_failed | error
         self.state = "idle"
         self.last_error = ""
@@ -788,6 +806,10 @@ class Agent:
         # Эталон высоты: сторона своей метки на рабочей высоте, пиксели. Снимается
         # после набора и живёт один полёт — вся высота считается от него (alt_by_ref).
         self.side_ref: float | None = None
+        # Сколько метров осталось набрать до рабочей высоты. Пока больше нуля, борт
+        # НЕ мерит высоту по метке и не снимает эталон: он ещё едет вверх, и кадр
+        # показывает высоту, которая уже отрабатывается (разбор — в шапке файла).
+        self._climb_left = 0.0
         self._ref_prev: float | None = None  # сторона на прошлом такте: эталон по двум
         self._ref_tries = 0                  # тактов потрачено на согласие двух кадров
         # Поиск потерянной метки: где сейчас стоим относительно точки потери и какой
@@ -852,6 +874,10 @@ class Agent:
         }
         if self.dry:
             st["dry"] = True  # честно: на том конце заглушка, а не аппарат
+        if self.climbing:
+            # Сколько ещё набирать. Поле есть только на наборе, и по нему видно, что
+            # alt в статусе — это ЦЕЛЬ, а сам дрон пока ниже неё на столько метров.
+            st["climb_left"] = round(self._climb_left, 2)
         if self.last_error:
             st["last_error"] = self.last_error
         if self.hold_on:
@@ -975,6 +1001,15 @@ class Agent:
         return not self.args.no_hold and not self.dry
 
     @property
+    def climbing(self) -> bool:
+        """Идёт ли ещё набор остатка высоты после слепой ступени взлёта.
+
+        Пока идёт, высота по метке не мерится вовсе (эталон снимать не с чего: дрон
+        едет вверх), а горизонталь и курс правятся как обычно.
+        """
+        return self._climb_left > 1e-6
+
+    @property
     def climb_room(self) -> float:
         """Сколько метров вверх от рабочей высоты ещё разрешает потолок, м.
 
@@ -1088,8 +1123,13 @@ class Agent:
         Команда идёт МИМО очереди start(): это не команда борта, а короткое обращение
         к железу. Через start() такт получал бы «занят» ровно тогда, когда дрон висит
         и его надо держать, а с вытеснением отменял бы чужую команду.
+
+        На состоянии climbing такт работает так же, с одной разницей: высота не
+        мерится по метке, а НАБИРАЕТСЯ шагами по --climb-step из остатка, который борт
+        считает по своим же командам (разбор — в шапке файла). Горизонталь и курс при
+        этом правятся с первого же кадра, где метка видна.
         """
-        if not self.hold_on or self.state != "hover":
+        if not self.hold_on or self.state not in ("hover", "climbing"):
             return "idle"
         if self._busy:
             return "busy"       # идёт посадка или взлёт: под ноги не лезем
@@ -1131,7 +1171,10 @@ class Agent:
                             self.args.sign_fwd, self.args.sign_left)
         self.miss = math.hypot(forward, left)
         self.side_seen = fix.side
-        if self.side_ref is None:
+        climbing = self.climbing
+        # Эталон снимается только с дрона, который уже никуда не едет: снятый на
+        # наборе, он закрепил бы промежуточную высоту как рабочую на весь полёт.
+        if self.side_ref is None and not climbing:
             self._take_ref(fix.side)
         self.alt_seen = (
             None if self.side_ref is None
@@ -1153,19 +1196,45 @@ class Agent:
             forward, left, alt_error, self._yaw_error(fix), time.monotonic(),
             up_room=self.climb_room - self._blind_up,
         )
-        if command is None:
+        # Шаг набора идёт МИМО Holder: тот правит уже набранную высоту по замеру, а
+        # здесь высота не мерится вовсе — она добирается по счёту. Из-за этого шаг и
+        # не гасится ни мёртвой зоной, ни сглаживанием: гасить нечего, промаха нет.
+        step = min(self._climb_left, max(0.01, self.args.climb_step)) if climbing else 0.0
+        if command is None and not step:
             return "hold"
-        go_fwd, go_left, go_up, turn = command
+        go_fwd, go_left, go_up, turn = command or (0.0, 0.0, 0.0, 0.0)
+        if climbing:
+            go_up = step
         seen_alt = "?" if self.alt_seen is None else f"{self.alt_seen:.2f}"
         # Промах пишется и по осям: постоянный остаток в одну сторону — это плечо
         # камеры (--cam-fwd/--cam-left), а не «дрон плохо держит», и по логу видно, по
         # какой оси его подкручивать.
-        say(f"удержание: метка {self.marker}, промах {self.miss:4.2f} м "
+        tail = "" if not climbing else f", добрать ещё {self._climb_left:.2f} м"
+        say(f"{'НАБОР' if climbing else 'удержание'}: метка {self.marker}, "
+            f"промах {self.miss:4.2f} м "
             f"(вперёд {forward:+5.2f} влево {left:+5.2f}), "
             f"h≈{seen_alt}/{self.alt:.2f} м ({fix.side:.0f} px) → "
             f"вперёд {go_fwd:+5.2f} влево {go_left:+5.2f} вверх {go_up:+5.2f} "
-            f"доворот {math.degrees(turn):+.0f}°")
-        return self._push(go_fwd, go_left, go_up, turn)
+            f"доворот {math.degrees(turn):+.0f}°{tail}")
+        outcome = self._push(go_fwd, go_left, go_up, turn, climb=climbing)
+        if climbing and outcome == "moved":
+            self._climbed(go_up)
+        return outcome
+
+    def _climbed(self, up: float) -> None:
+        """Записать набранные метры и, если набор кончился, объявить дрон висящим.
+
+        Остаток считается по СКОМАНДОВАННОМУ, а не по замеру: замер на наборе врёт
+        (разбор — в шапке файла). Промах команды из-за этого закрепится как рабочая
+        высота, ровно как промах взлёта закреплялся раньше, — видно это по side_ref в
+        /status и лечится ключом --alt.
+        """
+        self._climb_left = max(0.0, self._climb_left - max(0.0, up))
+        if self.climbing or self.state != "climbing":
+            return
+        self.state = "hover"
+        self._last_move = time.monotonic()
+        say(f"набор {self.alt:.2f} м закончен: беру эталон высоты по метке {self.marker}")
 
     def _search(self) -> str:
         """Один шаг поиска потерянной метки: подъём и короткие отходы во все стороны.
@@ -1224,20 +1293,28 @@ class Agent:
             # на самом деле висит, и возврат в центр увёл бы его мимо.
             return outcome
         self._search_off, self._search_leg = next_off, next_leg
-        self._blind_up = above
+        # Метку потеряли на наборе — подъём поиска идёт В СЧЁТ набора: дрон ещё НИЖЕ
+        # рабочей высоты, и записать те же метры ещё и в превышение значило бы
+        # посчитать их дважды, а потом добрать их же поверх.
+        if up > 0.0 and self.climbing:
+            used = min(up, self._climb_left)
+            self._climbed(used)
+            above -= used
+        self._blind_up = max(0.0, above)
         return "search"
 
-    def _push(self, forward: float, left: float, up: float, turn: float) -> str:
+    def _push(self, forward: float, left: float, up: float, turn: float,
+              climb: bool = False) -> str:
         """Отдать одну поправку. Скорость меньше полётной: доводка должна быть плавной.
 
-        Насыщенная поправка высоты означает, что дрон ещё набирает её после взлёта, —
-        тогда идём скоростью набора, а не медленной скоростью доводки.
+        Шаг набора (climb=True) и насыщенная поправка высоты означают, что дрон ещё
+        едет вверх, — тогда идём скоростью набора, а не медленной скоростью доводки.
 
         Здесь же взводится пауза до следующего замера: путь делится на скорость, плюс
         --settle на успокоение. Без неё контур мерил бы дрон в движении и с креном —
         разбор в hold_tick.
         """
-        climbing = abs(up) >= self.args.alt_fix - 1e-6
+        climbing = climb or abs(up) >= self.args.alt_fix - 1e-6
         speed = self.args.climb_speed if climbing else self.args.fix_speed
         try:
             resp = self._hw("удержание", lambda: self.drone.control.navigate(
@@ -1367,7 +1444,7 @@ class Agent:
         return not job.cancel.wait(seconds)
 
     def takeoff(self, alt: float) -> dict:
-        if self.state in ("taking_off", "hover"):
+        if self.state in ALOFT:
             # Повторная команда взлёта намеренно не доходит до navigate: второй вызов
             # переинициализирует траекторию, и дрон зависает, начиная заход заново.
             return {
@@ -1378,23 +1455,26 @@ class Agent:
         return self.start("takeoff", lambda job: self._takeoff(alt, job))
 
     def _takeoff(self, alt: float, job: Job) -> None:
-        """Взлёт ОДНОЙ командой, и только потом — передача дрона контуру удержания.
+        """Слепая ступень взлёта, а остаток высоты добирает контур по метке.
 
-        Пауза здесь — это весь набор высоты (путь на скорость набора) плюс успокоение
-        и --lock-wait. Она нужна по двум причинам, и обе появились 30.07.2026 вместе с
-        удержанием высоты по эталону.
+        Одной командой уходит только --takeoff-blind метров, и держит дрон на них
+        автопилот: с площадки метка либо не в кадре, либо занимает его целиком, так
+        что цепляться на этой ступени всё равно не за что. Пауза здесь — путь этой
+        ступени на скорость набора плюс успокоение и --lock-wait.
 
-        Первая: эталон снимается с висящего дрона, и снять его раньше просто не с чего.
-        Вторая важнее. navigate не блокирующий, и пока дрон едет вверх, кадр показывает
-        высоту, которая уже отрабатывается. Контур, включённый в этот момент, видел
-        «недобор» и досылал его поверх недоехавшей команды взлёта — набор складывался
-        сам с собой, и дрон уходил заметно выше заказанного. Прежняя версия включала
-        контур через --lock-wait (полсекунды) ровно посреди набора.
-
-        Плата — те самые несколько секунд, когда дрон держит только автопилот. На
-        наборе это не страшно: он идёт вертикально, сносить его нечему.
+        Дальше борт переходит в climbing, и остаток набирает такт удержания: шагами по
+        --climb-step, попутно правя положение и курс по метке. Высоту на этих шагах он
+        НЕ мерит (разбор — в шапке файла и у _climbed): пока дрон едет вверх, кадр
+        показывает высоту, которая уже отрабатывается, и контур, поверивший ему,
+        досылал бы недобор поверх недоехавшей команды — набор складывался бы сам с
+        собой. До 30.07.2026 так и было, только слепой шла вся высота целиком.
         """
         alt = min(float(alt), self.args.max_alt)
+        # Слепой ступени больше заказанной высоты не бывает: 0,7 м из --takeoff-blind
+        # рассчитаны на рабочие 2 м, а команда «взлети на полметра» — это полметра.
+        # Контур выключен (--no-hold, --dry) — добирать остаток некому, и вся высота
+        # уходит вслепую: иначе дрон навсегда остался бы висеть на слепой ступени.
+        blind = alt if not self.hold_on else max(0.0, min(float(self.args.takeoff_blind), alt))
         self._set(job, state="taking_off")
         self.last_error = ""
         self.holder.reset()
@@ -1402,34 +1482,47 @@ class Agent:
         # Эталон высоты живёт ровно один полёт: он снят на прошлой рабочей высоте, и
         # на новой (или после перестановки дрона) врал бы ровно на разницу.
         self.side_ref, self._ref_prev, self._ref_tries = None, None, 0
+        self._climb_left = 0.0
         self._blind_up = 0.0
         self._yaw_ref, self._yaw_drift, self._yaw_warned = None, None, False
         self.blind, self.marker_lost = 0, False
         self._search_off, self._search_leg = (0.0, 0.0), 0
-        say(f"ВЗЛЁТ на {alt:g} м, дальше держусь по метке {self.marker}")
+        rest = max(0.0, alt - blind)
+        say(f"ВЗЛЁТ на {alt:g} м: {blind:g} м вслепую"
+            + (f", остальные {rest:.2f} м — по метке {self.marker}" if rest else ""))
         if self.dry:
             wait = 2.0
         else:
             # Ровно один navigate: повторный вызов переинициализирует траекторию.
             resp = self._hw("взлёт", lambda: self.drone.control.navigate(
-                x=0.0, y=0.0, z=alt, yaw=0.0,
+                x=0.0, y=0.0, z=blind, yaw=0.0,
                 speed=self.args.climb_speed, frame_id="body", auto_arm=True,
             ), timeout=20.0)
             ok = getattr(resp, "success", True)
             say(f"взлёт принят: {ok} {getattr(resp, 'message', '')}")
             if resp is not None and not ok:
                 raise NavRefused(f"взлёт не принят: {getattr(resp, 'message', '')}")
-            # Ждём весь набор, а не «когда команда принята»: разбор — в докстроке.
+            # Ждём всю слепую ступень, а не «когда команда принята»: контур не должен
+            # включаться посреди неё — разбор в докстроке.
             speed = max(self.args.climb_speed, 0.01)
-            wait = alt / speed + max(0.0, self.args.settle) + self.args.lock_wait
+            wait = blind / speed + max(0.0, self.args.settle) + self.args.lock_wait
         # Высота записывается до паузы: если взлёт вытеснит аварийная посадка, дрон
         # всё равно уже пошёл вверх, и врать про ноль в статусе хуже, чем оценить.
+        # Это ЦЕЛЬ: на время набора дрон ниже неё на climb_left (см. /status).
         self._set(job, alt=alt)
         if not self._wait(job, wait):
             say("взлёт прерван более важной командой — состояние не трогаю")
             return
-        self._set(job, state="hover", moved=True)
-        say(f"набираю {alt:g} м, удержание по метке включено")
+        # Остаток пишется только после проверки: команду мог вытеснить land, и тогда
+        # набирать высоту садящемуся дрону — последнее, что нужно.
+        if not self._set(job, state="climbing" if rest else "hover", moved=True):
+            return
+        self._climb_left = rest
+        if rest:
+            say(f"слепая ступень {blind:g} м набрана: остаток {rest:.2f} м добираю "
+                f"шагами по {self.args.climb_step:g} м, правя место и курс по метке")
+        else:
+            say(f"{alt:g} м набрано, удержание по метке включено")
 
     def land(self) -> dict:
         return self.start("land", self._land)
@@ -1443,6 +1536,8 @@ class Agent:
         self._settle_until = 0.0
         # Эталон снят на рабочей высоте: на снижении он уже ни о чём не говорит.
         self.side_ref, self._ref_prev, self._ref_tries = None, None, 0
+        # Недобранный остаток здесь и кончается: садящемуся дрону добирать нечего.
+        self._climb_left = 0.0
         self._blind_up = 0.0
         self.alt_seen = self.miss = self.side_seen = None
         say("ПОСАДКА")
@@ -1718,7 +1813,7 @@ class Agent:
             # «error» в списке намеренно: дрон, у которого сорвалась команда, висит
             # ровно так же, как исправный, и без этого остаётся в воздухе навсегда —
             # Failsafe обязан сажать по факту «мы в воздухе», а не по факту «всё хорошо».
-            aloft = self.state in ("taking_off", "hover") or (
+            aloft = self.state in ALOFT or (
                 self.state == "error" and self.alt > 0.0
             )
             if quiet > limit and aloft:
@@ -1832,10 +1927,15 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-alt", type=float, default=3.0,
                    help="потолок, м (регламент 2.6: 4 м от пола, площадка до 0,825 м)")
     p.add_argument("--climb-speed", type=float, default=0.3, help="скорость набора высоты, м/с")
+    p.add_argument("--takeoff-blind", type=float, default=0.7,
+                   help="сколько метров взлёта идёт вслепую одной командой, м; остаток "
+                        "до --alt добирает контур, правя место и курс по метке")
+    p.add_argument("--climb-step", type=float, default=0.3,
+                   help="каким шагом контур добирает остаток высоты, м")
     p.add_argument("--land-wait", type=float, default=4.0, help="пауза на снижение, с")
     p.add_argument("--lock-wait", type=float, default=0.5,
-                   help="запас паузы после набора высоты до первой поправки контура, с "
-                        "(сам набор и --settle ждутся сверх этого)")
+                   help="запас паузы после слепой ступени взлёта до первой поправки "
+                        "контура, с (сама ступень и --settle ждутся сверх этого)")
     p.add_argument("--watchdog", type=float, default=120.0, help="сесть, если нет команд N с (0 — выкл)")
     p.add_argument("--grid", default="6,6", help="размер поля в клетках")
     p.add_argument("--cell-size", type=float, default=0.8, help="сторона клетки, м")
@@ -1964,7 +2064,9 @@ def main(argv: list[str] | None = None) -> int:
         aim_note = (f"прицел на {args.cam_fwd * 100:.0f} см назад"
                     if args.cam_fwd else "прицел в центр метки")
         say(f"держусь по метке {agent.marker}: такт раз в {args.hold_period:g} с, "
-            f"высота {args.alt:g} м по её стороне (эталон снимается после набора), "
+            f"взлёт {args.takeoff_blind:g} м вслепую и остаток шагами по "
+            f"{args.climb_step:g} м по метке, высота {args.alt:g} м по её стороне "
+            f"(эталон снимается после набора), "
             f"потолок {args.max_alt:g} м над площадкой, {aim_note}")
     elif args.no_hold and not args.dry:
         say("за метку не держусь: запущен с --no-hold, положение и высота на автопилоте")

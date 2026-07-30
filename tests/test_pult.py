@@ -185,15 +185,15 @@ class BoardsTest(unittest.TestCase):
         self.assertEqual(sorted(boards), ["m1", "m2", "m3", "m4"])
         self.assertEqual(boards["m1"].cell, "1,1")
         self.assertEqual(boards["m1"].marker, 62)
-        self.assertEqual(boards["m4"].cell, "4,4")
-        self.assertEqual(boards["m4"].marker, 60)
+        self.assertEqual(boards["m3"].cell, "4,4")
+        self.assertEqual(boards["m3"].marker, 60)
         self.assertEqual(len({b.marker for b in boards.values()}), 4)
 
     def test_given_addresses_win_over_the_config(self):
         boards = self.boards(["--all", "10.0.0.1,10.0.0.2"])
         self.assertEqual([b.ip for b in boards], ["10.0.0.1", "10.0.0.2"])
         self.assertEqual(boards[0].url, "http://10.0.0.1:2200")
-        self.assertEqual(boards[1].marker, 7)  # площадка m2, метка из карты
+        self.assertEqual(boards[1].marker, 50)  # площадка m2, метка из карты
 
     def test_more_addresses_than_drones_is_refused(self):
         with self.assertRaises(RobotError):

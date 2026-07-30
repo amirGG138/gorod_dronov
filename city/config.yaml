@@ -212,13 +212,13 @@ robots:
       enabled: true
     m2:
       url: http://192.168.1.106:2200
-      pad: [4, 1]
-      enabled: false
+      pad: [1, 4]
+      enabled: true
     m3:
       url: http://192.168.1.107:2200
-      pad: [1, 4]
+      pad: [4, 4]
       enabled: true
     m4:
       url: http://192.168.1.108:2200
-      pad: [4, 4]
-      enabled: false
+      pad: [4, 1]
+      enabled: true

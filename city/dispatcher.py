@@ -549,7 +549,11 @@ class Dispatcher:
         error = ""
         try:
             drone.takeoff(self.survey_alt)
-            self._wait_state(drone, ("hover",), timeout=20.0)
+            # Ждать дольше самого взлёта: борт уходит вслепую только на первые 0,7 м,
+            # а остаток добирает шагами по метке и говорит «висит» в конце набора.
+            # Кадр до этого момента снят с промежуточной высоты — покрытие по нему
+            # посчиталось бы мимо.
+            self._wait_state(drone, ("hover",), timeout=45.0)
             if not offsets:
                 self._look_and_see(name, drone, pad_xy, seen, home=None)
             for point in offsets:
@@ -1090,7 +1094,9 @@ class Dispatcher:
             return
         vup = self.fleet.vup
         vup.takeoff(VUP_ALT)
-        self._wait_state(vup, ("hover",), timeout=20.0)
+        # Столько же, сколько монитору: если ВУП поднят нашим бортовым агентом, взлёт
+        # у него такой же двухступенчатый — вслепую, потом набор по метке.
+        self._wait_state(vup, ("hover",), timeout=45.0)
         vup.goto(self.sc.fire_cell, VUP_ALT)
         self._wait_state(vup, ("hover",), timeout=30.0)
         try:

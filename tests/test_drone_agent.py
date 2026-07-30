@@ -106,6 +106,12 @@ def fix(u=320.0, v=240.0, side=SIDE_AT_2M, angle=0.0, mid=62):
     return da.Fix(mid, u, v, side, angle)
 
 
+# «Команда взлёта отработала»: борт уходит вслепую только на первую ступень
+# (--takeoff-blind), а остаток высоты добирает такт удержания, и всё это время он в
+# climbing. Тестам, которым нужен просто поднявшийся дрон, ждать hover незачем.
+AIRBORNE = ("climbing", "hover")
+
+
 def wait_state(agent, states, seconds=5.0) -> str:
     deadline = time.monotonic() + seconds
     while time.monotonic() < deadline:
@@ -144,7 +150,7 @@ class TestPreemption(unittest.TestCase):
     def test_second_takeoff_does_not_issue_a_second_navigate(self):
         agent = make_agent()
         agent.takeoff(1.5)
-        wait_state(agent, ("hover",))
+        wait_state(agent, AIRBORNE)
         agent.takeoff(1.5)
         self.assertEqual(agent.drone.control.navigates, 1)
 
@@ -166,7 +172,7 @@ class TestDedup(unittest.TestCase):
         self.assertTrue(first["accepted"])
         self.assertTrue(second["deduplicated"])
         self.assertNotIn("deduplicated", first)
-        wait_state(agent, ("hover",))
+        wait_state(agent, AIRBORNE)
         self.assertEqual(agent.drone.control.navigates, 1)
 
     def test_repeat_gets_an_answer_instead_of_busy(self):
@@ -179,7 +185,7 @@ class TestDedup(unittest.TestCase):
     def test_different_ids_are_different_commands(self):
         agent = make_agent()
         agent.once("a", lambda: agent.takeoff(1.5))
-        wait_state(agent, ("hover",))
+        wait_state(agent, AIRBORNE)
         agent.once("b", agent.land)
         self.assertEqual(wait_state(agent, ("landed", "landed_unverified")), "landed_unverified")
         self.assertEqual(agent.drone.control.lands, 1)
@@ -433,9 +439,23 @@ class TestHoldTick(unittest.TestCase):
         agent = make_agent(*argv)
         agent.camera_ok = True
         agent.takeoff(2.0)
-        wait_state(agent, ("hover",))
+        wait_state(agent, AIRBORNE)
         wait_idle(agent)
-        return self.referenced(agent)
+        return self.referenced(self.climbed(agent))
+
+    @classmethod
+    def climbed(cls, agent):
+        """Прокрутить такты набора: вслепую борт уходит только на первую ступень.
+
+        Остаток до рабочей высоты добирает сам контур, шагами по --climb-step, и
+        «висит» борт скажет только в конце. Тестам про удержание нужен уже набравший
+        дрон, поэтому набор здесь просто проматывается.
+        """
+        for _ in range(int(agent.args.alt / max(agent.args.climb_step, 0.01)) + 4):
+            if not agent.climbing:
+                break
+            cls.settled(agent).hold_tick()
+        return agent
 
     @classmethod
     def referenced(cls, agent):
@@ -540,8 +560,9 @@ class TestHoldTick(unittest.TestCase):
         agent = make_agent("--ref-calm", "0.15")
         agent.camera_ok = True
         agent.takeoff(2.0)
-        wait_state(agent, ("hover",))
+        wait_state(agent, AIRBORNE)
         wait_idle(agent)
+        self.climbed(agent)          # эталон снимается только после набора
 
         self.seen = {62: fix(side=100.0)}
         self.settled(agent).hold_tick()
@@ -558,8 +579,9 @@ class TestHoldTick(unittest.TestCase):
         agent = make_agent("--ref-tries", "3")
         agent.camera_ok = True
         agent.takeoff(2.0)
-        wait_state(agent, ("hover",))
+        wait_state(agent, AIRBORNE)
         wait_idle(agent)
+        self.climbed(agent)
         for step, side in enumerate((100.0, 200.0, 400.0), start=1):
             self.seen = {62: fix(side=side)}
             self.settled(agent).hold_tick()
@@ -571,8 +593,9 @@ class TestHoldTick(unittest.TestCase):
         agent = make_agent("--smooth", "1")
         agent.camera_ok = True
         agent.takeoff(2.0)
-        wait_state(agent, ("hover",))
+        wait_state(agent, AIRBORNE)
         wait_idle(agent)
+        self.climbed(agent)          # набор кончился, а эталона ещё нет
         self.seen = {62: fix(v=290.0)}                  # править есть что, но только вбок
         self.assertEqual(self.settled(agent).hold_tick(), "moved")
         self.assertIsNone(agent.alt_seen)
@@ -679,7 +702,7 @@ class TestHoldTick(unittest.TestCase):
         agent.land()
         wait_state(agent, ("landed", "landed_unverified"))
         agent.takeoff(2.0)
-        wait_state(agent, ("hover",))
+        wait_state(agent, AIRBORNE)
         wait_idle(agent)
         self.assertEqual(agent.hold_tick(), "moved")
 
@@ -790,23 +813,138 @@ class TestHoldTick(unittest.TestCase):
         agent.drone.control.refuse = False
         self.assertEqual(round(self.leg(agent)[0], 2), 0.3)   # всё та же первая сторона
 
-    def test_holding_waits_for_the_climb_to_finish(self):
-        """Контур не лезет в набор высоты, пока тот идёт: иначе набор складывается сам с собой.
+    def test_holding_waits_for_the_blind_step_to_finish(self):
+        """Контур не лезет в СЛЕПУЮ ступень взлёта, пока она идёт.
 
-        navigate не блокирующий. Дрон, включённый в контур посреди набора, видит по
-        кадру недобор, который УЖЕ отрабатывается командой взлёта, и досылает его
+        navigate не блокирующий. Дрон, включённый в контур посреди этой ступени, видит
+        по кадру недобор, который УЖЕ отрабатывается командой взлёта, и досылает его
         поверх недоехавшей цели — так дрон и уходил выше заказанного.
         """
         self.seen = {62: fix(u=200.0)}         # метку снесло: контуру есть что править
-        agent = make_agent("--climb-speed", "4.0", "--settle", "0.1", "--lock-wait", "0.1")
+        agent = make_agent("--climb-speed", "4.0", "--settle", "0.1", "--lock-wait", "0.1",
+                           "--takeoff-blind", "2.0")
         agent.camera_ok = True
         started = time.monotonic()
-        agent.takeoff(2.0)                     # набор 2 м на 4 м/с = 0,5 с
+        agent.takeoff(2.0)                     # вслепую все 2 м на 4 м/с = 0,5 с
         self.assertEqual(agent.hold_tick(), "idle")            # ещё набирает
         self.assertEqual(wait_state(agent, ("hover",), 3.0), "hover")
         self.assertGreater(time.monotonic() - started, 0.5)
         wait_idle(agent)
         self.assertEqual(agent.hold_tick(), "moved")
+
+    # --- набор остатка высоты по метке -------------------------------------
+
+    def climbing(self, *argv):
+        """Дрон отработал слепую ступень и добирает остаток: состояние climbing."""
+        agent = make_agent(*argv)
+        agent.camera_ok = True
+        agent.takeoff(2.0)
+        wait_state(agent, AIRBORNE)
+        wait_idle(agent)
+        return self.settled(agent)
+
+    def test_only_the_blind_step_is_flown_by_the_takeoff_command(self):
+        """Вслепую уходит 0,7 м, а не вся высота: дальше есть за что держаться."""
+        agent = self.climbing()
+        self.assertEqual(agent.drone.control.navigates, 1)
+        self.assertAlmostEqual(agent.drone.control.calls[0]["z"], 0.7, places=6)
+        self.assertEqual(agent.state, "climbing")
+        self.assertAlmostEqual(agent._climb_left, 1.3, places=6)
+        # alt в статусе — ЦЕЛЬ, и climb_left честно говорит, что дрон пока ниже неё.
+        self.assertAlmostEqual(agent.status()["climb_left"], 1.3, places=2)
+
+    def test_the_rest_is_climbed_by_the_hold_in_steps(self):
+        """Остаток добирается шагами по --climb-step, и ровно остаток, ни метром больше."""
+        agent = self.climbing("--climb-step", "0.5")
+        climbed = 0.0
+        for _ in range(10):
+            if not agent.climbing:
+                break
+            self.assertEqual(self.settled(agent).hold_tick(), "moved")
+            climbed += agent.drone.control.calls[-1]["z"]
+        self.assertAlmostEqual(climbed, 1.3, places=6)          # 0,5 + 0,5 + 0,3
+        self.assertEqual(agent.state, "hover")
+
+    def test_the_climb_goes_at_climb_speed(self):
+        """Шаг набора — это подъём, а не доводка: идём скоростью набора."""
+        agent = self.climbing("--climb-step", "0.1", "--climb-speed", "0.4",
+                              "--fix-speed", "0.05")
+        self.settled(agent).hold_tick()
+        self.assertAlmostEqual(agent.drone.control.calls[-1]["speed"], 0.4, places=6)
+
+    def test_place_and_heading_are_held_while_climbing(self):
+        """Набор идёт с поправкой по метке — ради этого он и отдан контуру."""
+        agent = self.climbing("--gain", "1.0", "--damp", "0", "--smooth", "1",
+                              "--min-hop", "0.0")
+        # Первый же такт с меткой снимает эталон курса — от него и считается увод.
+        self.settled(agent).hold_tick()
+        self.seen = {62: fix(v=290.0, angle=math.radians(20.0))}
+        self.assertEqual(self.settled(agent).hold_tick(), "moved")
+        last = agent.drone.control.calls[-1]
+        self.assertLess(last["x"], -0.02)                       # метку сносило назад
+        self.assertAlmostEqual(math.degrees(last["yaw"]), -10.0, places=6)
+
+    def test_height_is_not_measured_by_the_marker_while_climbing(self):
+        """Пока дрон едет вверх, кадр показывает высоту, которая уже отрабатывается.
+
+        Поверив ему, контур досылал бы недобор поверх недоехавшей команды — набор
+        складывался бы сам с собой. Поэтому на наборе ни эталона, ни замера высоты.
+        """
+        agent = self.climbing()
+        self.seen = {62: fix(side=SIDE_AT_2M * 4.0)}            # «дрон на 0,5 м»
+        self.settled(agent).hold_tick()
+        self.assertIsNone(agent.side_ref)
+        self.assertIsNone(agent.alt_seen)
+        # Вверх ушёл ровно шаг набора, а не «недобор» в полтора метра.
+        self.assertAlmostEqual(agent.drone.control.calls[-1]["z"], 0.3, places=6)
+
+    def test_the_reference_is_taken_when_the_climb_is_over(self):
+        """Эталон высоты снимается ровно тогда, когда набирать больше нечего."""
+        agent = self.climbing()
+        self.climbed(agent)
+        self.assertEqual(agent.state, "hover")
+        self.assertIsNone(agent.side_ref)                       # ещё ни одного замера
+        self.referenced(agent)
+        self.assertIsNotNone(agent.side_ref)
+        self.assertAlmostEqual(agent.alt_seen, 2.0, places=2)
+
+    def test_a_low_takeoff_is_blind_all_the_way(self):
+        """Заказали меньше слепой ступени — вся высота и уходит вслепую, набирать нечего."""
+        agent = make_agent()
+        agent.camera_ok = True
+        agent.takeoff(0.5)
+        self.assertEqual(wait_state(agent, AIRBORNE), "hover")
+        self.assertAlmostEqual(agent.drone.control.calls[0]["z"], 0.5, places=6)
+        self.assertFalse(agent.climbing)
+        self.assertNotIn("climb_left", agent.status())
+
+    def test_a_search_rise_counts_towards_the_climb(self):
+        """Метку потеряли на наборе: подъём поиска — те же метры, и добирать их дважды нельзя."""
+        agent = self.climbing("--blind-max", "1", "--search-rise", "0.2")
+        left = agent._climb_left
+        self.seen = {}
+        self.assertEqual(self.settled(agent).hold_tick(), "search")
+        self.assertAlmostEqual(agent.drone.control.calls[-1]["z"], 0.2, places=6)
+        self.assertAlmostEqual(agent._climb_left, left - 0.2, places=6)
+        self.assertEqual(agent._blind_up, 0.0)   # дрон всё ещё НИЖЕ рабочей высоты
+
+    def test_without_the_hold_the_whole_takeoff_is_blind(self):
+        """Контур выключен — добирать остаток некому, и дрон остался бы висеть на 0,7 м."""
+        agent = make_agent("--no-hold")
+        agent.camera_ok = True
+        agent.takeoff(2.0)
+        self.assertEqual(wait_state(agent, AIRBORNE), "hover")
+        self.assertAlmostEqual(agent.drone.control.calls[0]["z"], 2.0, places=6)
+        self.assertFalse(agent.climbing)
+
+    def test_landing_forgets_the_unfinished_climb(self):
+        """Севшему дрону добирать нечего: остаток обязан обнулиться вместе с посадкой."""
+        agent = self.climbing()
+        self.assertTrue(agent.climbing)
+        agent.land()
+        wait_state(agent, ("landed", "landed_unverified"))
+        self.assertFalse(agent.climbing)
+        self.assertEqual(agent.hold_tick(), "idle")
 
     def test_switched_off_by_the_flag(self):
         agent = self.hovering("--no-hold")
@@ -1057,7 +1195,7 @@ class TestHttp(unittest.TestCase):
 
     def test_takeoff_and_land_are_accepted(self):
         self.assertTrue(self.post("/takeoff", {"alt": 2.0})[1]["accepted"])
-        wait_state(self.agent, ("hover",))
+        wait_state(self.agent, AIRBORNE)
         self.assertTrue(self.post("/land")[1]["accepted"])
 
     def test_a_shot_is_a_jpeg(self):
